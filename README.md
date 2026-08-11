@@ -1,6 +1,11 @@
 # GoProViewer
 
-Native Apple Silicon macOS app to browse, preview, and transfer media from a GoPro over USB — no Quik, no MTP. Talks to the camera's built-in HTTP server via the Open GoPro wired API. Built and tested with a HERO13 Black, but nothing in it is model-specific: any camera that speaks Open GoPro over USB should work — HERO10 Black and everything after (HERO11 Black / Mini, HERO12, HERO13, MAX 2, …).
+A simple macOS app to browse, preview, and transfer media from a GoPro over USB — no Quik, no MTP.
+
+## Supported devices
+
+- **Camera**: built and tested with a HERO13 Black, but nothing in the app is model-specific — any camera that speaks Open GoPro over USB should work: HERO10 Black and everything after (HERO11 Black / Mini, HERO12, HERO13, MAX 2, …). HERO9 Black's USB mode is older RNDIS networking that macOS doesn't support natively; it can still connect over Wi-Fi with a manual IP (see Settings).
+- **Mac**: Apple Silicon (M1 or later), macOS 14 Sonoma or newer.
 
 ## Features
 
@@ -12,7 +17,7 @@ Native Apple Silicon macOS app to browse, preview, and transfer media from a GoP
 - Optional per Settings: include `.GPR` raws, include `.LRV`/`.THM` proxies, and the day-folder naming pattern (`YYYYMMDD` by default; try `YYYY-MM-DD`, or `YYYY/MM/DD` to nest).
 - Live battery / SD-card status in the sidebar; distinguishes "camera asleep" from "not plugged in".
 - Displayed times are the camera's own clock (GoPro timestamps carry no timezone).
-- If discovery fails, set a manual IP in Settings — also works over Wi-Fi/COHN if the camera is reachable on your LAN. (HERO9 Black's USB mode is older RNDIS networking, which macOS doesn't support natively — use the Wi-Fi route for that one.)
+- If discovery fails, set a manual IP in Settings — also works over Wi-Fi/COHN if the camera is reachable on your LAN.
 - Thumbnails cache in `~/Library/Caches/GoProOffload/`; transfer activity is logged to `~/Library/Logs/GoProOffload.log`.
 - Default destination is `~/Movies/GoPro` (changeable in the sidebar or Settings).
 
@@ -49,3 +54,7 @@ xattr -dr com.apple.quarantine /Applications/GoProViewer.app
 ```
 
 Builds with the system Swift toolchain and produces `dist/GoProViewer.app` (ad-hoc signed). The same **Local Network** prompt applies on first launch.
+
+### How does it work ?
+
+The app talks to the camera's built-in HTTP server via the [Open GoPro](https://gopro.github.io/OpenGoPro/) wired API. In GoPro Connect mode the camera shows up as a USB network interface, and the app finds it there at `172.2x.x.51:8080` — media listing, thumbnails, previews, video streaming, and downloads are all plain HTTP from that point on.
