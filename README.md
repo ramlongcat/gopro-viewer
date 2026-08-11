@@ -8,7 +8,7 @@ Native Apple Silicon macOS app to browse, preview, and transfer media from a GoP
 2. On the camera: swipe down → **Preferences → Connections → USB Connection → GoPro Connect** (not MTP).
 3. Wake the camera (tap any button). macOS brings up a "HERO13 Black" network interface and the app finds the camera automatically at `172.2x.x.51`.
 
-## Install (pre-built)
+## How to install ?
 
 Apple Silicon, macOS 14+. Paste this in Terminal — it downloads the [latest release](https://github.com/ramlongcat/gopro-viewer/releases/latest), installs it to `/Applications`, and launches it:
 
@@ -16,21 +16,7 @@ Apple Silicon, macOS 14+. Paste this in Terminal — it downloads the [latest re
 curl -fsSL https://raw.githubusercontent.com/ramlongcat/gopro-viewer/main/install.sh | bash
 ```
 
-Prefer doing it by hand? Grab `GoProViewer.app.zip` from the [latest release](https://github.com/ramlongcat/gopro-viewer/releases/latest), unzip, drop `GoProViewer.app` into `/Applications`, then clear the quarantine flag (the app is ad-hoc signed — macOS would otherwise report it as "damaged"):
-
-```
-xattr -dr com.apple.quarantine /Applications/GoProViewer.app
-```
-
 First launch triggers macOS's **Local Network** permission prompt — allow it; that's the USB link to the camera.
-
-## Build & run (from source)
-
-```
-./build.sh --open
-```
-
-Builds with the system Swift toolchain and produces `dist/GoProViewer.app` (ad-hoc signed). The same **Local Network** prompt applies on first launch.
 
 ## What it does
 
@@ -48,3 +34,21 @@ Builds with the system Swift toolchain and produces `dist/GoProViewer.app` (ad-h
 - If discovery fails, set a manual IP in Settings — also works over Wi-Fi/COHN if the camera is reachable on your LAN.
 - Thumbnails cache in `~/Library/Caches/GoProOffload/`; transfer activity is logged to `~/Library/Logs/GoProOffload.log`.
 - Default destination is `~/Movies/GoPro` (changeable in the sidebar or Settings).
+
+## Advanced (for nerds)
+
+### Manual install
+
+Prefer installing it by hand? Grab `GoProViewer.app.zip` from the [latest release](https://github.com/ramlongcat/gopro-viewer/releases/latest), unzip, drop `GoProViewer.app` into `/Applications`, then clear the quarantine flag (the app is ad-hoc signed — macOS would otherwise report it as "damaged"):
+
+```
+xattr -dr com.apple.quarantine /Applications/GoProViewer.app
+```
+
+### Build & run from source
+
+```
+./build.sh --open
+```
+
+Builds with the system Swift toolchain and produces `dist/GoProViewer.app` (ad-hoc signed). The same **Local Network** prompt applies on first launch.
