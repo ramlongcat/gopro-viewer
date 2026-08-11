@@ -1,5 +1,7 @@
 # GoProViewer
 
+![GoProViewer](screenshot.png)
+
 A simple macOS app to browse, preview, and copy files your GoPro to your mac.
 
 Connect your camera to your mac, turn your camera on, enjoy! that's it.
@@ -31,7 +33,7 @@ Connect your camera to your mac, turn your camera on, enjoy! that's it.
 
 ## How to install ?
 
-Apple Silicon, macOS 14+. Paste this in Terminal — it downloads the [latest release](https://github.com/ramlongcat/gopro-viewer/releases/latest), installs it to `/Applications`, and launches it:
+Apple Silicon, macOS 14+. Paste this in Terminal (type "terminal" in the Spotlight search and press Enter, then paste the line below and press Enter) — it downloads the [latest release](https://github.com/ramlongcat/gopro-viewer/releases/latest), installs it to `/Applications`, and launches it:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/ramlongcat/gopro-viewer/main/install.sh | bash
