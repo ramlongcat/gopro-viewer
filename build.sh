@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Builds GoProOffload and assembles a runnable .app bundle in dist/.
-# Usage: ./build.sh [--open]
+# Usage: ./build.sh [--open] [--zip]
+#   --zip  also produce dist/GoProViewer.app.zip (the GitHub release asset)
 set -e
 cd "$(dirname "$0")"
 
@@ -49,6 +50,11 @@ echo -n 'APPL????' > "$APP/Contents/PkgInfo"
 codesign --force --sign - "$APP"
 echo "Built: $APP"
 
-if [[ "$1" == "--open" ]]; then
+if [[ "$*" == *--zip* ]]; then
+    ditto -c -k --keepParent "$APP" "dist/GoProViewer.app.zip"
+    echo "Zipped: dist/GoProViewer.app.zip"
+fi
+
+if [[ "$*" == *--open* ]]; then
     open "$APP"
 fi
