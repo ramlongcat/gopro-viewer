@@ -40,6 +40,8 @@ final class TransferManager: ObservableObject {
     @Published var doneBytes: Int64 = 0
     @Published var currentFileBytes: Int64 = 0
     @Published var totalKnownBytes: Int64 = 0
+    /// Files actually being transferred this run (already-copied ones excluded).
+    @Published var toTransferCount = 0
     @Published var speed: Double = 0
     @Published var failures: [String] = []
     @Published var wasCancelled = false
@@ -98,7 +100,8 @@ final class TransferManager: ObservableObject {
         currentFileBytes = 0
         speed = 0
         speedWindow = []
-        totalKnownBytes = newJobs.compactMap(\.file.size).reduce(0, +)
+        totalKnownBytes = 0
+        toTransferCount = 0
 
         runTask = Task { await run(client: client) }
     }
@@ -115,10 +118,39 @@ final class TransferManager: ObservableObject {
     }
 
     private func run(client: GoProClient) async {
-        let useTurbo = jobs.count > 1
+        // Pre-pass: settle "already copied" for the whole queue first, so the
+        // progress bar's totals only ever cover files that actually transfer.
+        var pendingBytes: Int64 = 0
+        var pending = 0
+        for idx in jobs.indices {
+            let (_, alreadyThere) = resolveDestination(for: jobs[idx].file)
+            if alreadyThere {
+                jobs[idx].state = .skipped
+            } else {
+                pendingBytes += jobs[idx].file.size ?? 0
+                pending += 1
+            }
+        }
+        totalKnownBytes = pendingBytes
+        toTransferCount = pending
+        let preSkipped = jobs.count - pending
+        if preSkipped > 0 {
+            AppLog.log("  \(preSkipped) of \(jobs.count) file(s) already at destination")
+        }
+
+        guard pending > 0 else {
+            speed = 0
+            phase = .finished
+            AppLog.log("transfer finished: \(summaryLine)")
+            model?.transfersFinished()
+            return
+        }
+
+        let useTurbo = pending > 1
         if useTurbo { await client.setTurbo(true) }
 
         for idx in jobs.indices {
+            if jobs[idx].state == .skipped { continue }
             if Task.isCancelled {
                 wasCancelled = true
                 for rest in idx..<jobs.count where jobs[rest].state == .pending {
@@ -131,12 +163,21 @@ final class TransferManager: ObservableObject {
             currentName = job.file.name
             currentFileBytes = 0
             do {
-                let skipped = try await download(job, client: client)
-                AppLog.log("  \(job.file.name): \(skipped ? "skipped (already present)" : "done")")
-                jobs[idx].state = skipped ? .skipped : .done
-                filesDone += 1
-                doneBytes += job.file.size ?? currentFileBytes
-                currentFileBytes = 0
+                let appearedMeanwhile = try await download(job, client: client)
+                if appearedMeanwhile {
+                    // Landed on disk after the pre-pass — drop it from the totals.
+                    AppLog.log("  \(job.file.name): already present")
+                    jobs[idx].state = .skipped
+                    totalKnownBytes -= job.file.size ?? 0
+                    toTransferCount -= 1
+                    currentFileBytes = 0
+                } else {
+                    AppLog.log("  \(job.file.name): done")
+                    jobs[idx].state = .done
+                    filesDone += 1
+                    doneBytes += job.file.size ?? currentFileBytes
+                    currentFileBytes = 0
+                }
             } catch {
                 if error is CancellationError || (error as? GoProError).map({ if case .cancelled = $0 { return true }; return false }) == true {
                     jobs[idx].state = .cancelled

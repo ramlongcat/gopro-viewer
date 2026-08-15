@@ -11,13 +11,15 @@ struct TransferBarView: View {
                     .font(.title2)
                     .foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Transferring \(min(transfers.filesDone + 1, transfers.fileCount)) of \(transfers.fileCount) — \(transfers.currentName)")
+                    Text(transfers.toTransferCount == 0
+                         ? "Checking what's already copied…"
+                         : "Transferring \(min(transfers.filesDone + 1, transfers.toTransferCount)) of \(transfers.toTransferCount) — \(transfers.currentName)")
                         .font(.callout)
                         .lineLimit(1)
                     if let f = transfers.overallFraction {
                         ProgressView(value: f)
                     } else {
-                        ProgressView(value: Double(transfers.filesDone), total: Double(max(1, transfers.fileCount)))
+                        ProgressView(value: Double(transfers.filesDone), total: Double(max(1, transfers.toTransferCount)))
                     }
                 }
                 VStack(alignment: .trailing, spacing: 2) {
