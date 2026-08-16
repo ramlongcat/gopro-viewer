@@ -1,10 +1,11 @@
 # GoProViewer
 
-![GoProViewer](screenshot.png)
-
 A simple macOS app to browse, preview, and copy files your GoPro to your mac.
 
 Connect your camera to your mac, turn your camera on, enjoy! that's it.
+
+![GoProViewer](screenshot.png)
+
 
 ## Supported devices
 
