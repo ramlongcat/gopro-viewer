@@ -1,6 +1,6 @@
 # GoProViewer
 
-Version **0.1.0**
+Version **1.0.0**
 
 A simple macOS app to browse, preview, and copy files your GoPro to your mac.
 
