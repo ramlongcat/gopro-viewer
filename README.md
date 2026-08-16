@@ -1,5 +1,7 @@
 # GoProViewer
 
+Version **0.1.0**
+
 A simple macOS app to browse, preview, and copy files your GoPro to your mac.
 
 Connect your camera to your mac, turn your camera on, enjoy! that's it.
@@ -59,6 +61,8 @@ xattr -dr com.apple.quarantine /Applications/GoProViewer.app
 ```
 
 Builds with the system Swift toolchain and produces `dist/GoProViewer.app` (ad-hoc signed). The same **Local Network** prompt applies on first launch.
+
+The app's version is read from the [`VERSION`](VERSION) file at build time and stamped into the bundle — to cut a release, bump it there (and in this README's header).
 
 ### How does it work ?
 

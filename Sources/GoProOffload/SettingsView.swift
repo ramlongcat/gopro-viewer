@@ -44,8 +44,11 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section {
+                LabeledContent("Version", value: AppInfo.version)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 470)
+        .frame(width: 520, height: 520)
     }
 }

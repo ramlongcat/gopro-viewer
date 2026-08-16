@@ -55,6 +55,13 @@ func shortHash(_ s: String) -> String {
     return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
 }
 
+enum AppInfo {
+    /// App version (semver). Stamped into Info.plist by build.sh from the
+    /// VERSION file; "dev" when running the bare binary outside a bundle.
+    static let version: String =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+}
+
 enum GoProError: LocalizedError {
     case http(Int, String)
     case badResponse(String)

@@ -5,6 +5,10 @@
 set -e
 cd "$(dirname "$0")"
 
+# App version (semver) — single source of truth is the VERSION file.
+VERSION="$(<VERSION)"
+[[ "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { echo "VERSION must be semver (got: $VERSION)" >&2; exit 1; }
+
 swift build -c release
 
 APP="dist/GoProViewer.app"
@@ -17,7 +21,8 @@ if [[ ! -f Resources/AppIcon.icns ]]; then
 fi
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Unquoted heredoc so $VERSION expands; the plist contains no other $ / backticks.
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -29,8 +34,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>GoProViewer</string>
     <key>CFBundleDisplayName</key><string>GoProViewer</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -48,7 +53,7 @@ PLIST
 
 echo -n 'APPL????' > "$APP/Contents/PkgInfo"
 codesign --force --sign - "$APP"
-echo "Built: $APP"
+echo "Built: $APP (v$VERSION)"
 
 if [[ "$*" == *--zip* ]]; then
     ditto -c -k --keepParent "$APP" "dist/GoProViewer.app.zip"
