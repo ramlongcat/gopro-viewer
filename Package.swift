@@ -9,7 +9,7 @@ let package = Package(
             name: "GoProOffload",
             path: "Sources/GoProOffload",
             swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [.linkedFramework("AVKit")]
+            linkerSettings: [.linkedFramework("AVKit"), .linkedFramework("MapKit")]
         )
     ]
 )

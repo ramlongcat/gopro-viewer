@@ -55,7 +55,7 @@ final class TransferManager: ObservableObject {
     private var speedWindow: [(Date, Int64)] = []
     /// Snapshot of files already present under the destination base, so
     /// already-copied media is skipped wherever it lives.
-    private var preexisting: [String: Set<Int64>] = [:]
+    private var preexisting: [String: [AppModel.DestHit]] = [:]
 
     func start(entries: [MediaEntry], client: GoProClient) {
         guard !entries.isEmpty else { return }
@@ -178,6 +178,18 @@ final class TransferManager: ObservableObject {
                     doneBytes += job.file.size ?? currentFileBytes
                     currentFileBytes = 0
                 }
+                // The copied gauge and the tile check should turn as each
+                // item completes, not when the whole batch does. An entry is
+                // complete once no other job of its still has work left.
+                let entryID = job.entryID
+                let entryDone = !jobs.contains {
+                    guard $0.entryID == entryID else { return false }
+                    switch $0.state {
+                    case .pending, .running, .failed, .cancelled: return true
+                    case .done, .skipped: return false
+                    }
+                }
+                if entryDone { model?.entryCopied(entryID) }
             } catch {
                 if error is CancellationError || (error as? GoProError).map({ if case .cancelled = $0 { return true }; return false }) == true {
                     jobs[idx].state = .cancelled
@@ -236,10 +248,10 @@ final class TransferManager: ObservableObject {
     private func resolveDestination(for tf: TransferFile) -> (URL, alreadyThere: Bool) {
         let fm = FileManager.default
         let baseURL = destinationURL(for: tf)
-        if let sizes = preexisting[tf.name] {
+        if let hits = preexisting[tf.name] {
             if let expected = tf.size {
-                if sizes.contains(expected) { return (baseURL, true) }
-            } else if !sizes.isEmpty {
+                if hits.contains(where: { $0.size == expected }) { return (baseURL, true) }
+            } else if !hits.isEmpty {
                 return (baseURL, true)
             }
         }
@@ -286,7 +298,7 @@ final class TransferManager: ObservableObject {
         let present = jobs.filter { $0.state == .skipped }.count
         let cancelled = jobs.filter { $0.state == .cancelled }.count
         if !jobs.isEmpty, present == jobs.count {
-            return "All \(present == 1 ? "1 file is" : "\(present) files are") already copied — nothing to transfer"
+            return "All \(present == 1 ? "1 file is" : "\(present) files are") already copied — nothing to do"
         }
         var parts: [String] = []
         if done > 0 { parts.append("\(done) transferred") }

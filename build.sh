@@ -9,6 +9,16 @@ cd "$(dirname "$0")"
 VERSION="$(<VERSION)"
 [[ "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { echo "VERSION must be semver (got: $VERSION)" >&2; exit 1; }
 
+# Secret for the bundled Google OAuth client — lives in a git-ignored file
+# and ships only inside the built app, never in the repo. Installed-app
+# secrets aren't confidential (any shipped binary can be read), but public
+# repo *text* trips GitHub/Google secret scanning.
+GOOGLE_SECRET=""
+[[ -f .google-client-secret ]] && GOOGLE_SECRET="$(<.google-client-secret)"
+GOOGLE_SECRET="${GOOGLE_SECRET//[$'\r\n ']/}"
+SECRET_PLIST=""
+[[ -n "$GOOGLE_SECRET" ]] && SECRET_PLIST="<key>GoogleClientSecret</key><string>$GOOGLE_SECRET</string>"
+
 swift build -c release
 
 APP="dist/GoProViewer.app"
@@ -20,6 +30,11 @@ if [[ ! -f Resources/AppIcon.icns ]]; then
     swift tools/make_icon.swift Resources/AppIcon.icns
 fi
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/profile.jpg "$APP/Contents/Resources/profile.jpg"
+
+# launchd helper for the optional "open when a GoPro is plugged in" agent
+# (Settings → Connection); lives in the bundle so the agent follows the app.
+clang -O2 -o "$APP/Contents/MacOS/GoProUSBLauncher" tools/usb_launcher.c
 
 # Unquoted heredoc so $VERSION expands; the plist contains no other $ / backticks.
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -36,6 +51,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
+    $SECRET_PLIST
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -52,6 +68,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 echo -n 'APPL????' > "$APP/Contents/PkgInfo"
+codesign --force --sign - "$APP/Contents/MacOS/GoProUSBLauncher"
 codesign --force --sign - "$APP"
 echo "Built: $APP (v$VERSION)"
 

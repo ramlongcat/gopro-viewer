@@ -4,10 +4,12 @@ import SwiftUI
 struct GoProOffloadApp: App {
     @StateObject private var model: AppModel
     @StateObject private var transfers: TransferManager
+    @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
 
     init() {
         Prefs.register()
         Prefs.migrateDatedDestination()
+        AutoLaunch.syncAtLaunch()
         let m = AppModel()
         _model = StateObject(wrappedValue: m)
         _transfers = StateObject(wrappedValue: m.transfers)
@@ -22,7 +24,35 @@ struct GoProOffloadApp: App {
                 .frame(minWidth: 980, minHeight: 600)
         }
         .defaultSize(width: 1240, height: 800)
+        .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About GoProViewer") { model.showAbout = true }
+            }
+            // The default Help item opens a help book this app doesn't ship,
+            // so macOS answers "help isn't available". Point it somewhere real.
+            CommandGroup(replacing: .help) {
+                Button("GoProViewer on GitHub") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/ramlongcat/gopro-viewer")!)
+                }
+                Button("Report an Issue") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/ramlongcat/gopro-viewer/issues")!)
+                }
+            }
+            CommandGroup(after: .sidebar) {
+                Button(sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar") {
+                    withAnimation(.easeOut(duration: 0.2)) { sidebarCollapsed.toggle() }
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+            }
+            CommandGroup(after: .sidebar) {
+                Button("Show All") { model.filter = .all }
+                    .keyboardShortcut("1")
+                Button("Show Videos") { model.filter = .videos }
+                    .keyboardShortcut("2")
+                Button("Show Photos") { model.filter = .photos }
+                    .keyboardShortcut("3")
+            }
             CommandGroup(after: .newItem) {
                 Button("Refresh Media") { Task { await model.loadMedia() } }
                     .keyboardShortcut("r")
@@ -38,6 +68,9 @@ struct GoProOffloadApp: App {
                     }
                 }
                 .keyboardShortcut("a")
+                Button("Select Missing Items") { model.selectMissing() }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                    .disabled(model.connState != .connected || model.missingEntries.isEmpty)
                 Button("Deselect All") { model.deselectAll() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
             }

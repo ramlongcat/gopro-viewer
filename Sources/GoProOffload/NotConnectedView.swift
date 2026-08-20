@@ -104,6 +104,20 @@ struct NotConnectedView: View {
 
             ProgressView()
                 .controlSize(.small)
+
+            Divider()
+                .frame(maxWidth: 260)
+            VStack(spacing: 6) {
+                Button {
+                    model.switchTo(.mac)
+                } label: {
+                    Label("Browse What's Already on This Mac", systemImage: "apple.logo")
+                }
+                .controlSize(.large)
+                Text("Everything you've copied, without the camera.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

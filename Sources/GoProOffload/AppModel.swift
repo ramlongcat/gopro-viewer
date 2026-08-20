@@ -17,6 +17,21 @@ enum MediaFilter: String, CaseIterable, Identifiable {
     }
 }
 
+/// Grid ordering. `buildEntries` hands back newest-first, so ascending is a
+/// reverse rather than a re-sort.
+enum SortOrder: String, CaseIterable, Identifiable {
+    case dateDescending = "Date descending"
+    case dateAscending = "Date ascending"
+    var id: String { rawValue }
+}
+
+/// Which items the grid shows, independent of the videos/photos tabs.
+enum ShowScope: String, CaseIterable, Identifiable {
+    case all = "All items"
+    case notCopied = "Only items not copied yet"
+    var id: String { rawValue }
+}
+
 struct ViewerTarget: Identifiable, Equatable {
     let id: String
 }
@@ -50,9 +65,35 @@ final class AppModel: ObservableObject {
     /// this so successive range clicks retarget (Finder) instead of accumulating.
     private var shiftBase: Set<String> = []
     @Published var filter: MediaFilter = .all
+    @Published var showAbout = false
+    /// A day key from the sidebar calendar, or nil for the whole library.
+    @Published var dayFilter: String?
+    @Published var sortOrder = SortOrder(rawValue: Prefs.sortOrder) ?? .dateDescending {
+        didSet { UserDefaults.standard.set(sortOrder.rawValue, forKey: Prefs.kSortOrder) }
+    }
+    @Published var showScope = ShowScope(rawValue: Prefs.showScope) ?? .all {
+        didSet { UserDefaults.standard.set(showScope.rawValue, forKey: Prefs.kShowScope) }
+    }
+    /// Camera or this Mac. Switching reloads the grid from the other side.
+    @Published var source: MediaSource = .camera
     @Published var viewer: ViewerTarget?
     @Published var mediaInfo: [String: MediaInfoLite] = [:]
     @Published var downloadedIDs = Set<String>()
+    /// Where each copied entry was actually found — the badge tooltip names
+    /// it, and a name+size match can live anywhere under the destination, not
+    /// just in the folder this run would have written to.
+    @Published var downloadedFolders: [String: URL] = [:]
+    /// A GoPro on the USB link is drawing power from the Mac, so a camera
+    /// that isn't full is charging.
+    @Published private(set) var poweredOverUSB = false
+    /// Seconds to a full battery, extrapolated from how fast the reported
+    /// percentage has been climbing. Nil until it has climbed at least once.
+    @Published private(set) var batteryTimeToFull: TimeInterval?
+    /// The percentage has gone up while we watched — proof of charging that
+    /// doesn't depend on guessing from the kind of connection.
+    @Published private(set) var batteryRising = false
+    /// One entry per percentage change: (when it was first seen, percentage).
+    private var batterySamples: [(at: Date, pct: Int)] = []
 
     let transfers = TransferManager()
     let thumbs = ThumbnailLoader()
@@ -60,6 +101,10 @@ final class AppModel: ObservableObject {
     private var loopTask: Task<Void, Never>?
     private var activationObserver: NSObjectProtocol?
     private var infoFetches = Set<String>()
+    /// Whether the live connection came in over the camera's USB network
+    /// interface. Only then does "GoPro USB port gone" mean unplugged —
+    /// override/LAN/emulator connections must not be dropped by that check.
+    private var usbLinked = false
 
     init() {
         transfers.model = self
@@ -76,10 +121,17 @@ final class AppModel: ObservableObject {
         loopTask = Task { [weak self] in
             while let self, !Task.isCancelled {
                 if self.connState == .connected {
-                    // Idle means idle: no camera traffic at all. Unplugging is
-                    // noticed by watching (locally) for the USB interface.
-                    if !self.transfers.isActive, goProUSBPortName() == nil {
-                        self.disconnect()
+                    if !self.transfers.isActive {
+                        if self.usbLinked {
+                            // Idle means idle on USB: no camera traffic at all.
+                            // Unplugging is noticed locally via the interface.
+                            if goProUSBPortName() == nil { self.disconnect() }
+                        } else if let ip = self.client?.ip,
+                                  await GoProClient.probe(ip: ip) == .unreachable {
+                            // Emulator/LAN links have no interface to watch; a
+                            // light ping notices the peer going away.
+                            self.disconnect()
+                        }
                     }
                     try? await Task.sleep(for: .seconds(5))
                 } else {
@@ -94,7 +146,31 @@ final class AppModel: ObservableObject {
     /// transfers — the app never polls an idle camera.
     func refreshState() async {
         guard let client, connState == .connected, !transfers.isActive else { return }
-        if let s = try? await client.state() { status = s }
+        if let s = try? await client.state() {
+            status = s
+            if let pct = s.batteryPercent { noteBattery(pct) }
+        }
+    }
+
+    /// Charge rate from the percentages seen so far. Only changes are recorded,
+    /// so the rate is measured between the first sighting of two levels; older
+    /// samples age out so a slowing charge is reflected rather than averaged
+    /// away forever.
+    private func noteBattery(_ pct: Int) {
+        let now = Date()
+        if batterySamples.last?.pct != pct { batterySamples.append((now, pct)) }
+        batterySamples.removeAll { now.timeIntervalSince($0.at) > 45 * 60 }
+        guard let first = batterySamples.first, let last = batterySamples.last,
+              last.pct > first.pct, last.pct < 100 else {
+            batteryRising = false
+            batteryTimeToFull = nil
+            return
+        }
+        batteryRising = true
+        let elapsed = last.at.timeIntervalSince(first.at)
+        guard elapsed > 30 else { batteryTimeToFull = nil; return }
+        let perSecond = Double(last.pct - first.pct) / elapsed
+        batteryTimeToFull = Double(100 - last.pct) / perSecond
     }
 
     private func infoCacheFile(_ c: GoProClient) -> URL {
@@ -119,14 +195,20 @@ final class AppModel: ObservableObject {
         }
         let last = Prefs.lastCameraIP
         if !last.isEmpty, !out.contains(last) { out.append(last) }
+        // Last resort so the dev emulator (tools/gopro_emulator.py) is found
+        // the moment it starts, like plugging a camera in. Real cameras come
+        // first, and the localhost probe is strict.
+        if !out.contains(Self.emulatorIP) { out.append(Self.emulatorIP) }
         return out
     }
+
+    static let emulatorIP = "127.0.0.1"
 
     private func scan() async {
         var sawDenied = false
         let candidates = candidateIPs()
         for ip in candidates {
-            switch await GoProClient.probe(ip: ip) {
+            switch await GoProClient.probe(ip: ip, strict: ip == Self.emulatorIP) {
             case .ok:
                 await connect(ip)
                 return
@@ -151,6 +233,10 @@ final class AppModel: ObservableObject {
 
     private func connect(_ ip: String) async {
         connState = .connecting(ip)
+        let octets = ip.split(separator: ".")
+        usbLinked = octets.count == 4 && octets[0] == "172"
+        poweredOverUSB = usbLinked
+            && (Int(octets[1]).map { (20...29).contains($0) } ?? false)
         let c = GoProClient(ip: ip)
         try? await c.enableWiredControl()
         if let info = try? await c.cameraInfo() {
@@ -198,8 +284,90 @@ final class AppModel: ObservableObject {
         loadingMedia = false
     }
 
-    var filteredEntries: [MediaEntry] {
+    func switchTo(_ newSource: MediaSource) {
+        guard newSource != source else { return }
+        source = newSource
+        selection = []
+        selectionAnchor = nil
+        viewer = nil
+        entries = []
+        dayFilter = nil
+        mediaError = nil
+        Task { await reload() }
+    }
+
+    func reload() async {
+        switch source {
+        case .camera: await loadMedia()
+        case .mac: await loadLocalMedia()
+        }
+    }
+
+    /// Everything already copied under the destination, folded by the same
+    /// rules the camera list goes through.
+    func loadLocalMedia() async {
+        loadingMedia = true
+        mediaError = nil
+        let base = Prefs.destination
+        let files = await Task.detached(priority: .userInitiated) { LocalLibrary.scan(base) }.value
+        entries = buildEntries(files)
+        selection = selection.filter { id in entries.contains { $0.id == id } }
+        // "Already copied" is what this source *is*; every item counts.
+        downloadedIDs = Set(entries.map(\.id))
+        loadingMedia = false
+    }
+
+    /// Where a file's bytes live for the source in view — an HTTP URL on the
+    /// camera, a file URL on this Mac.
+    func mediaURL(_ file: CameraFile) -> URL? {
+        switch source {
+        case .camera: return client?.downloadURL(path: file.path)
+        case .mac: return URL(fileURLWithPath: file.path)
+        }
+    }
+
+    /// What a grid hover preview should play.
+    func hoverURL(_ entry: MediaEntry) -> URL? {
+        switch source {
+        case .camera:
+            // The proxy or nothing: pulling a full-quality stream over USB
+            // for a thumbnail would starve the grid and the camera both.
+            guard let proxy = entry.proxyPath else { return nil }
+            return client?.downloadURL(path: proxy)
+        case .mac:
+            // No link to protect here. Use the proxy if it happens to have
+            // been copied, otherwise the clip itself plays perfectly well.
+            if let proxy = entry.proxyPath, FileManager.default.fileExists(atPath: proxy) {
+                return URL(fileURLWithPath: proxy)
+            }
+            guard case .video(let chapters) = entry.kind, let first = chapters.first else { return nil }
+            return URL(fileURLWithPath: first.path)
+        }
+    }
+
+    var localSpace: (free: Int64, total: Int64)? {
+        LocalLibrary.volumeSpace(at: Prefs.destination)
+    }
+
+    /// Entries matching the videos/photos tabs only — the copy-progress
+    /// summary needs a denominator that doesn't shrink when the View menu
+    /// hides copied items.
+    var typeFilteredEntries: [MediaEntry] {
         entries.filter { filter.matches($0) }
+    }
+
+    /// What the grid shows: tabs, then the View menu's scope and sort order.
+    var filteredEntries: [MediaEntry] {
+        var list = typeFilteredEntries
+        if let dayFilter {
+            list = list.filter { Fmt.dayKey.string(from: $0.created) == dayFilter }
+        }
+        if showScope == .notCopied {
+            list = list.filter { !downloadedIDs.contains($0.id) }
+        }
+        // buildEntries already sorts newest-first.
+        if sortOrder == .dateAscending { list.reverse() }
+        return list
     }
 
     var sections: [DaySection] {
@@ -211,7 +379,7 @@ final class AppModel: ObservableObject {
             byDay[key, default: []].append(e)
         }
         return order.map { key in
-            DaySection(id: key, title: Fmt.dayTitle.string(from: byDay[key]![0].created), entries: byDay[key]!)
+            DaySection(id: key, title: Fmt.daySection(byDay[key]![0].created), entries: byDay[key]!)
         }
     }
 
@@ -226,8 +394,21 @@ final class AppModel: ObservableObject {
     func fetchInfo(for entry: MediaEntry) {
         guard entry.isVideo, mediaInfo[entry.id] == nil,
               !infoFetches.contains(entry.id),
-              let client, !transfers.isActive,
               case .video(let chapters) = entry.kind else { return }
+        if source == .mac {
+            infoFetches.insert(entry.id)
+            Task {
+                var combined = MediaInfoLite()
+                for ch in chapters {
+                    guard let mi = await LocalLibrary.info(for: URL(fileURLWithPath: ch.path)) else { continue }
+                    if combined == MediaInfoLite() { combined = mi }
+                    else { combined.duration = (combined.duration ?? 0) + (mi.duration ?? 0) }
+                }
+                if combined != MediaInfoLite() { mediaInfo[entry.id] = combined }
+            }
+            return
+        }
+        guard let client, !transfers.isActive else { return }
         infoFetches.insert(entry.id)
         Task {
             var combined = MediaInfoLite()
@@ -265,13 +446,18 @@ final class AppModel: ObservableObject {
     /// Filename -> sizes of media files found anywhere under the destination
     /// base, so "already copied" is recognized even after the folder naming
     /// scheme changes or files get reorganized by hand.
-    private(set) var destIndex: [String: Set<Int64>] = [:]
+    struct DestHit: Sendable {
+        let size: Int64
+        let url: URL
+    }
+
+    private(set) var destIndex: [String: [DestHit]] = [:]
 
     func rebuildDestIndex() async {
         let base = Prefs.destination
         destIndex = await Task.detached(priority: .utility) {
-            func scan() -> [String: Set<Int64>] {
-                var idx: [String: Set<Int64>] = [:]
+            func scan() -> [String: [DestHit]] {
+                var idx: [String: [DestHit]] = [:]
                 let exts: Set<String> = ["MP4", "JPG", "LRV", "THM", "GPR", "360"]
                 guard let en = FileManager.default.enumerator(
                     at: base,
@@ -286,7 +472,7 @@ final class AppModel: ObservableObject {
                     guard exts.contains(url.pathExtension.uppercased()),
                           let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
                           vals.isRegularFile == true, let size = vals.fileSize else { continue }
-                    idx[url.lastPathComponent, default: []].insert(Int64(size))
+                    idx[url.lastPathComponent, default: []].append(DestHit(size: Int64(size), url: url))
                 }
                 return idx
             }
@@ -300,26 +486,66 @@ final class AppModel: ObservableObject {
         await rebuildDestIndex()
         let idx = destIndex
         var done = Set<String>()
+        var folders: [String: URL] = [:]
         let fm = FileManager.default
+
+        /// Where this file already sits on disk, or nil if it doesn't.
+        func located(_ tf: TransferFile) -> URL? {
+            if let hits = idx[tf.name] {
+                if let size = tf.size {
+                    if let hit = hits.first(where: { $0.size == size }) { return hit.url }
+                } else if let hit = hits.first {
+                    return hit.url
+                }
+            }
+            let url = destinationURL(for: tf)
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return nil }
+            guard let size = tf.size else { return url }
+            return (attrs[.size] as? NSNumber)?.int64Value == size ? url : nil
+        }
+
         for e in entries {
             let files = e.mainFiles
             guard !files.isEmpty else { continue }
-            let all = files.allSatisfy { tf in
-                if let sizes = idx[tf.name] {
-                    if let size = tf.size {
-                        if sizes.contains(size) { return true }
-                    } else if !sizes.isEmpty {
-                        return true
-                    }
-                }
-                let url = destinationURL(for: tf)
-                guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return false }
-                guard let size = tf.size else { return true }
-                return (attrs[.size] as? NSNumber)?.int64Value == size
+            let found = files.compactMap(located)
+            if found.count == files.count {
+                done.insert(e.id)
+                folders[e.id] = found[0].deletingLastPathComponent()
             }
-            if all { done.insert(e.id) }
         }
         downloadedIDs = done
+        downloadedFolders = folders
+    }
+
+    /// Tooltip for the copied badge, naming the folder the file is in.
+    /// What the tick on a tile means: copied here, when looking at the
+    /// camera; sent to Google Photos, when looking at what's already here.
+    func isMarked(_ entry: MediaEntry) -> Bool {
+        switch source {
+        case .camera:
+            return downloadedIDs.contains(entry.id)
+        case .mac:
+            let sendable = GooglePhotos.sendables(of: entry)
+            guard !sendable.isEmpty else { return false }
+            return sendable.allSatisfy {
+                GooglePhotos.shared.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size))
+            }
+        }
+    }
+
+    func markNote(for entry: MediaEntry) -> String {
+        source == .mac ? "Uploaded to Google Photos" : copiedNote(for: entry.id)
+    }
+
+    func copiedNote(for id: String) -> String {
+        let folder = downloadedFolders[id] ?? Prefs.destination
+        return "Already copied to \(homeRelativePath(folder))"
+    }
+
+    /// Live per-entry completion from the transfer queue; the full disk
+    /// rescan still runs when the batch ends.
+    func entryCopied(_ id: String) {
+        downloadedIDs.insert(id)
     }
 
     func transfersFinished() {
@@ -359,11 +585,32 @@ final class AppModel: ObservableObject {
                 selectionAnchor = id
                 shiftBase = [id]
             }
+        } else if selection.contains(id) {
+            // Plain click on an already-selected item unselects it.
+            selection.remove(id)
+            if selection.isEmpty { selectionAnchor = nil }
+            shiftBase = selection
         } else {
             selection = [id]
             selectionAnchor = id
             shiftBase = [id]
         }
+    }
+
+    /// Entries not yet found at the destination — drives "Select N Missing
+    /// Items" in the Select menus.
+    var missingEntries: [MediaEntry] {
+        entries.filter { !downloadedIDs.contains($0.id) }
+    }
+
+    /// Selects everything not yet transferred; drops any active filter so the
+    /// selection is fully visible and the toolbar Transfer count matches.
+    func selectMissing() {
+        filter = .all
+        selection = Set(missingEntries.map(\.id))
+        selectionAnchor = nil
+        shiftBase = selection
+        AppLog.log("selectMissing: \(selection.count)")
     }
 
     func downloadSelected() {

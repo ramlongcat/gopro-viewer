@@ -128,6 +128,14 @@ struct MediaEntry: Identifiable, Hashable {
         }
     }
 
+    /// The camera's low-res copy of the first chapter, for hover previews.
+    /// Nil when the camera didn't make one (photos, and some video modes).
+    var proxyPath: String? {
+        guard case .video(let chapters) = kind, let ch = chapters.first,
+              let lrv = ch.lrvName, (ch.lrvSize ?? 0) > 0 else { return nil }
+        return "\(ch.folder)/\(lrv)"
+    }
+
     var chapterCount: Int {
         if case .video(let c) = kind { return c.count }
         return 1

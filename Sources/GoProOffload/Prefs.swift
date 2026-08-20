@@ -8,7 +8,28 @@ enum Prefs {
     static let kFolderPattern = "folderDatePattern"
     static let kOverrideIP = "overrideIP"
     static let kLastIP = "lastCameraIP"
-    static let kPreferProxy = "preferProxyPlayback"
+    static let kAutoLaunch = "autoLaunchOnConnect"
+    static let kSortOrder = "gridSortOrder"
+    static let kShowScope = "gridShowScope"
+    static let kGoogleClientID = "googleClientID"
+    static let kGoogleClientSecret = "googleClientSecret"
+    static let kGoogleAccount = "googleAccount"
+    static let kGoogleAutoUpload = "googleAutoUpload"
+
+    /// The OAuth client this app ships with. It identifies the app, not a
+    /// person — installed-app client IDs are public by design — and anyone
+    /// who prefers their own Google Cloud project can replace it in Settings.
+    static let defaultGoogleClientID =
+        "911350370520-34s54eva59p0g1enso7s41jt0ef76kue.apps.googleusercontent.com"
+    /// Its secret. Google's token endpoint refuses a desktop-client exchange
+    /// without one even under PKCE, and Google's own docs concede installed-app
+    /// secrets "are not treated as confidential" — every shipping desktop app
+    /// embeds one. The real value rides in the built app's Info.plist, stamped
+    /// by build.sh from the git-ignored `.google-client-secret` file, so the
+    /// public repo never carries it; this constant is only a last-resort slot
+    /// for plain `swift build` runs.
+    static let defaultGoogleClientSecret = ""
+    static let kGridShowInfo = "gridShowInfo"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -16,7 +37,7 @@ enum Prefs {
             kIncludeRaw: true,
             kIncludeProxies: false,
             kFolderPattern: "YYYYMMDD",
-            kPreferProxy: true,
+            kAutoLaunch: false,
         ])
     }
 
@@ -34,6 +55,25 @@ enum Prefs {
         let s = (UserDefaults.standard.string(forKey: kFolderPattern) ?? "").trimmingCharacters(in: .whitespaces)
         return s.isEmpty ? "YYYYMMDD" : s
     }
+    static var googleClientID: String {
+        let s = (UserDefaults.standard.string(forKey: kGoogleClientID) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        return s.isEmpty ? defaultGoogleClientID : s
+    }
+    static var googleClientSecret: String {
+        let s = (UserDefaults.standard.string(forKey: kGoogleClientSecret) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        if !s.isEmpty { return s }
+        // The bundled secret pairs with the bundled client ID; someone using
+        // their own client brings their own secret (or their client is a type
+        // that takes none), so never cross the pairs.
+        guard googleClientID == defaultGoogleClientID else { return "" }
+        let baked = Bundle.main.object(forInfoDictionaryKey: "GoogleClientSecret") as? String
+            ?? defaultGoogleClientSecret
+        return baked.trimmingCharacters(in: .whitespaces)
+    }
+    static var googleAutoUpload: Bool { UserDefaults.standard.bool(forKey: kGoogleAutoUpload) }
+
     static var overrideIP: String {
         (UserDefaults.standard.string(forKey: kOverrideIP) ?? "").trimmingCharacters(in: .whitespaces)
     }
@@ -54,7 +94,9 @@ enum Prefs {
             d.set(dest.deletingLastPathComponent().path, forKey: kDestination)
         }
     }
-    static var preferProxy: Bool { UserDefaults.standard.bool(forKey: kPreferProxy) }
+    static var sortOrder: String { UserDefaults.standard.string(forKey: kSortOrder) ?? "" }
+    static var showScope: String { UserDefaults.standard.string(forKey: kShowScope) ?? "" }
+    static var autoLaunchOnConnect: Bool { UserDefaults.standard.bool(forKey: kAutoLaunch) }
 }
 
 private let folderFormatterLock = NSLock()
@@ -78,6 +120,13 @@ func folderName(for date: Date, pattern: String) -> String {
     }
     folderFormatterLock.unlock()
     return f.string(from: date)
+}
+
+/// Home-relative rendering of a path, for display ("~/Movies/GoPro/20260817").
+func homeRelativePath(_ url: URL) -> String {
+    let p = url.path
+    let home = NSHomeDirectory()
+    return p.hasPrefix(home) ? "~" + p.dropFirst(home.count) : p
 }
 
 /// Local path a camera file lands at, honoring the per-day folder preference.

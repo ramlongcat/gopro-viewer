@@ -1,4 +1,8 @@
 .build/
 .swiftpm/
 dist/
+# OAuth client secret for the bundled Google client. Stamped into the app by
+# build.sh; kept out of the repo so GitHub/Google secret scanners stay quiet.
+.google-client-secret
 .DS_Store
+tools/emulator-library/
