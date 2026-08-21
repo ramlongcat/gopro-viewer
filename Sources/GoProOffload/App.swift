@@ -54,9 +54,9 @@ struct GoProOffloadApp: App {
                     .keyboardShortcut("3")
             }
             CommandGroup(after: .newItem) {
-                Button("Refresh Media") { Task { await model.loadMedia() } }
+                Button("Refresh Media") { Task { await model.reload() } }
                     .keyboardShortcut("r")
-                    .disabled(model.connState != .connected)
+                    .disabled(model.source == .camera && model.connState != .connected)
                 Button("Select All Media") {
                     // ⌘A must keep working inside text fields: forward to the
                     // focused editor when there is one, else select the grid.
@@ -68,9 +68,11 @@ struct GoProOffloadApp: App {
                     }
                 }
                 .keyboardShortcut("a")
+                // No connection gate: with no camera the list is empty and the
+                // emptiness disables it, while the Mac library needs none.
                 Button("Select Missing Items") { model.selectMissing() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
-                    .disabled(model.connState != .connected || model.missingEntries.isEmpty)
+                    .disabled(model.missingEntries.isEmpty)
                 Button("Deselect All") { model.deselectAll() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
             }

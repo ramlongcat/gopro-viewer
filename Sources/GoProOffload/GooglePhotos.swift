@@ -32,6 +32,20 @@ final class GooglePhotos: ObservableObject {
     /// grid can badge the exact tile being sent.
     @Published private(set) var sendingKey = ""
     @Published private(set) var sendingFraction = 0.0
+    /// Byte accounting for the sidebar's note line: whole files finished this
+    /// batch, the position inside the one in flight, the batch total, and a
+    /// speed measured the same way the copy card's is.
+    @Published private(set) var sendDoneBytes: Int64 = 0
+    @Published private(set) var sendingBytes: Int64 = 0
+    @Published private(set) var sendTotalBytes: Int64 = 0
+    @Published private(set) var sendSpeed: Double = 0
+    /// Set while the file in flight is in a retry loop, so the card can say
+    /// "stalled — retrying" instead of a speed. The log line alone left the
+    /// bar looking frozen for no reason.
+    @Published private(set) var sendingNote: String?
+
+    private var speedWindow: [(Date, Int64)] = []
+    private var speedTimer: Task<Void, Never>?
 
     private var accessToken: String?
     private var accessExpiry = Date.distantPast
@@ -146,16 +160,25 @@ final class GooglePhotos: ObservableObject {
     }
     private var sessions: [String: ResumableSession] = [:]
 
-    /// Chunks are deliberately small: each is its own HTTP request, so
+    /// Chunks start deliberately small: each is its own HTTP request, so
     /// URLSession's idle timeout — which used to kill a whole-file POST the
     /// first time the uplink stalled for a minute — scopes to one slice that
     /// even a dial-up-grade link finishes in time, and a failure costs one
-    /// chunk, not the file.
-    private static let chunkBytes: Int64 = 4 << 20
+    /// chunk, not the file. But on a fast uplink small chunks waste real time
+    /// (a round trip of dead air after every 160 ms send), so each full chunk
+    /// that finishes quickly doubles the next, up to a cap the timeout still
+    /// covers at ~4.5 Mbps; the first sign of trouble drops straight back.
+    /// The size persists across the batch — hundreds of small photos never
+    /// individually last long enough to learn the link.
+    private static let chunkFloor: Int64 = 4 << 20
+    private static let chunkCap: Int64 = 64 << 20
     private static let chunkTimeout: TimeInterval = 120
+    private var chunkBytes: Int64 = GooglePhotos.chunkFloor
 
-    /// Sends one file and records it. Photos and videos only — Google Photos
-    /// has no use for .LRV proxies or .THM stills.
+    /// Sends one file's bytes and returns the upload token; the caller
+    /// registers the token as a media item (creates are batched — see
+    /// `flushCreates`) and records the file only once that succeeds. Photos
+    /// and videos only — Google Photos has no use for .LRV/.THM proxies.
     ///
     /// This is Google's resumable protocol, not the obvious single raw POST.
     /// The single POST had two failure modes seen in the field: a one-minute
@@ -165,7 +188,7 @@ final class GooglePhotos: ObservableObject {
     /// "reached 20%" of a 9 MB photo before vanishing. Chunks are retried
     /// from the last byte Google confirms holding, and the fraction shown is
     /// anchored to confirmed progress.
-    func upload(_ url: URL, size: Int64) async throws {
+    func upload(_ url: URL, size: Int64) async throws -> String {
         let key = Self.key(name: url.lastPathComponent, size: size)
         let fh = try FileHandle(forReadingFrom: url)
         defer { try? fh.close() }
@@ -186,12 +209,16 @@ final class GooglePhotos: ObservableObject {
         }
 
         let total = Double(max(1, size))
+        // A resumed file starts the gauges where Google left off, not at 0.
+        sendingFraction = Double(offset) / total
+        sendingBytes = offset
         var attempts = 0
         var uploadToken: String?
         while uploadToken == nil {
             if Task.isCancelled { throw CancellationError() }
             let remaining = size - offset
-            var len = min(remaining, Self.chunkBytes)
+            let planned = chunkBytes
+            var len = min(remaining, planned)
             if len < remaining {
                 // Every chunk but the last must be a multiple of the
                 // granularity the session stated.
@@ -205,9 +232,13 @@ final class GooglePhotos: ObservableObject {
             }
             let base = offset
             let progress = UploadProgress { [weak self] sent in
-                let f = Double(base + min(sent, len)) / total
-                Task { @MainActor in self?.sendingFraction = f }
+                let pos = base + min(sent, len)
+                Task { @MainActor in
+                    self?.sendingFraction = Double(pos) / total
+                    self?.sendingBytes = pos
+                }
             }
+            let started = Date()
             do {
                 var req = URLRequest(url: session.url)
                 req.timeoutInterval = Self.chunkTimeout
@@ -229,6 +260,13 @@ final class GooglePhotos: ObservableObject {
                 offset += len
                 attempts = 0
                 sendingFraction = Double(offset) / total
+                sendingBytes = offset
+                sendingNote = nil
+                // Only a full-size chunk proves the link — the short final
+                // slice of a small photo finishes fast at any speed.
+                if len == planned, Date().timeIntervalSince(started) < 30 {
+                    chunkBytes = min(planned * 2, Self.chunkCap)
+                }
                 if last {
                     guard let t = String(data: data, encoding: .utf8), !t.isEmpty else {
                         sessions[key] = nil
@@ -242,6 +280,8 @@ final class GooglePhotos: ObservableObject {
                 // Transport trouble — a timeout, a dropped connection, a 5xx.
                 if Task.isCancelled { throw error }
                 attempts += 1
+                chunkBytes = Self.chunkFloor
+                sendingNote = "stalled — retrying"
                 guard attempts <= 4 else { throw error }
                 AppLog.log("google photos: \(url.lastPathComponent) stalled at \(Self.pct(offset, size)) — retry \(attempts) of 4")
                 try? await Task.sleep(nanoseconds: UInt64(1 << attempts) * 1_000_000_000)
@@ -255,27 +295,101 @@ final class GooglePhotos: ObservableObject {
             }
         }
         sessions[key] = nil
-        let token = try await validAccessToken()
-        guard let uploadToken else { return }
-
-        var create = URLRequest(url: URL(string: "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate")!)
-        create.httpMethod = "POST"
-        create.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        create.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        create.httpBody = try JSONSerialization.data(withJSONObject: [
-            "newMediaItems": [["simpleMediaItem": ["uploadToken": uploadToken,
-                                                   "fileName": url.lastPathComponent]]],
-        ])
-        let (body, createResp) = try await URLSession.shared.data(for: create)
-        try Self.check(createResp, body, "Create media item")
-        // batchCreate answers 200 even when an individual item failed.
-        if let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-           let results = obj["newMediaItemResults"] as? [[String: Any]],
-           let status = results.first?["status"] as? [String: Any],
-           let code = status["code"] as? Int, code != 0 {
-            throw GoogleError.message((status["message"] as? String) ?? "Google rejected the item.")
+        guard let uploadToken else {
+            // Unreachable — the loop only exits with a token — but honest
+            // about it beats a force-unwrap.
+            throw GoogleError.message("Google returned no upload token.")
         }
-        markUploaded(name: url.lastPathComponent, size: size)
+        return uploadToken
+    }
+
+    /// A fully-sent file waiting for its mediaItems:batchCreate.
+    private struct PendingCreate {
+        let token: String
+        let name: String
+        let size: Int64
+    }
+
+    /// Registers pending files as media items in one call, marks the
+    /// successes as uploaded, and returns how many were rejected. Creates
+    /// are batched because the round trip was pure dead air between files —
+    /// on a photo batch, a large share of the wall clock. batchCreate
+    /// answers 200 even when individual items fail, so results are checked
+    /// one by one; they mirror the request's order.
+    private func flushCreates(_ batch: [PendingCreate]) async -> Int {
+        guard !batch.isEmpty else { return 0 }
+        var failures = 0
+        do {
+            let token = try await validAccessToken()
+            var create = URLRequest(url: URL(string: "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate")!)
+            create.httpMethod = "POST"
+            create.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            create.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            create.httpBody = try JSONSerialization.data(withJSONObject: [
+                "newMediaItems": batch.map {
+                    ["simpleMediaItem": ["uploadToken": $0.token, "fileName": $0.name]]
+                },
+            ])
+            let (body, resp) = try await URLSession.shared.data(for: create)
+            try Self.check(resp, body, "Create media items")
+            let results = ((try? JSONSerialization.jsonObject(with: body) as? [String: Any])
+                .flatMap { $0["newMediaItemResults"] as? [[String: Any]] }) ?? []
+            for (i, item) in batch.enumerated() {
+                // Success carries status {"message": "Success"} with the code
+                // omitted (proto3 drops zero); a missing result row is *not*
+                // assumed successful.
+                guard i < results.count,
+                      let status = results[i]["status"] as? [String: Any],
+                      (status["code"] as? Int ?? 0) == 0 else {
+                    failures += 1
+                    let msg = (i < results.count
+                               ? (results[i]["status"] as? [String: Any])?["message"] as? String
+                               : nil) ?? "Google rejected the item."
+                    lastError = "\(item.name): \(msg)"
+                    AppLog.log("google photos: \(item.name) rejected — \(msg)")
+                    continue
+                }
+                markUploaded(name: item.name, size: item.size)
+            }
+        } catch {
+            failures += batch.count
+            lastError = error.localizedDescription
+            AppLog.log("google photos: registering \(batch.count) item(s) failed — \(error.localizedDescription)")
+        }
+        return failures
+    }
+
+    /// Runs a flush outside the batch's task, so a cancel can't poison the
+    /// bookkeeping: URLSession calls inside a cancelled task throw
+    /// immediately, and bytes Google already holds in full deserve their
+    /// create — without it they'd be sent again next time.
+    private func flushDetached(_ pending: inout [PendingCreate]) async -> Int {
+        guard !pending.isEmpty else { return 0 }
+        let batch = pending
+        pending = []
+        return await Task { await self.flushCreates(batch) }.value
+    }
+
+    /// Sampled by a once-a-second clock while a batch runs — NOT from
+    /// URLSession's send callbacks. Those arrive in a burst while the socket
+    /// buffers a chunk, then go silent until Google answers; on a slow link
+    /// no window ever spanned two bursts, so the speed either froze or never
+    /// appeared at all. A steady clock also tells the truth about stalls:
+    /// when nothing moves for a while, the rate honestly sinks to zero (and
+    /// the card hides it in favour of the retry note).
+    private func sampleSpeed() {
+        guard sending else { return }
+        let now = Date()
+        let total = sendDoneBytes + sendingBytes
+        speedWindow.append((now, total))
+        speedWindow.removeAll { now.timeIntervalSince($0.0) > 10 }
+        if let first = speedWindow.first {
+            let dt = now.timeIntervalSince(first.0)
+            // A retry can move the position backwards (only Google's
+            // confirmed offset is trusted); clamp rather than show a
+            // negative rate.
+            if dt >= 1 { sendSpeed = max(0, Double(total - first.1) / dt) }
+        }
     }
 
     /// Kicks the batch off on its own task so Cancel has something to pull.
@@ -298,19 +412,47 @@ final class GooglePhotos: ObservableObject {
         sending = true
         sentCount = 0
         sendTotal = items.count
+        sendTotalBytes = items.map(\.size).reduce(0, +)
+        sendDoneBytes = 0
+        sendingBytes = 0
+        sendSpeed = 0
+        speedWindow = []
+        chunkBytes = Self.chunkFloor
         lastError = nil
+        speedTimer?.cancel()
+        speedTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                self?.sampleSpeed()
+            }
+        }
         var failures = 0
+        var pending: [PendingCreate] = []
         for item in items {
             if Task.isCancelled { break }
             if uploaded.contains(Self.key(name: item.url.lastPathComponent, size: item.size)) {
                 sentCount += 1
+                sendDoneBytes += item.size
+                // Skipped bytes were never transferred; without a reset the
+                // jump would read as a burst of speed.
+                speedWindow = []
                 continue
             }
             sendingName = item.url.lastPathComponent
             sendingKey = Self.key(name: item.url.lastPathComponent, size: item.size)
             sendingFraction = 0
+            sendingBytes = 0
+            sendingNote = nil
             do {
-                try await upload(item.url, size: item.size)
+                let token = try await upload(item.url, size: item.size)
+                pending.append(PendingCreate(token: token,
+                                             name: item.url.lastPathComponent,
+                                             size: item.size))
+                // Twenty per flush, not batchCreate's ceiling of 50: the
+                // round trip is already amortised to noise, badges land
+                // sooner, and a crash can only orphan a few files' worth of
+                // sent bytes (orphans are simply re-sent next time).
+                if pending.count >= 20 { failures += await flushDetached(&pending) }
             } catch {
                 // A pulled cancel surfaces as CancellationError or a
                 // cancelled URLSession task; neither is a failure to report.
@@ -318,14 +460,25 @@ final class GooglePhotos: ObservableObject {
                 failures += 1
                 lastError = "\(item.url.lastPathComponent): \(error.localizedDescription)"
                 AppLog.log("google photos: \(item.url.lastPathComponent) failed — \(error.localizedDescription)")
+                // The unsent remainder joins sendDoneBytes below; reset so
+                // it can't masquerade as transfer speed.
+                speedWindow = []
             }
             sentCount += 1
+            sendDoneBytes += item.size
+            sendingBytes = 0
         }
+        failures += await flushDetached(&pending)
+        speedTimer?.cancel()
+        speedTimer = nil
         let cancelled = Task.isCancelled
         sending = false
         sendingName = ""
         sendingKey = ""
         sendingFraction = 0
+        sendingBytes = 0
+        sendSpeed = 0
+        sendingNote = nil
         AppLog.log(cancelled
                    ? "google photos: upload cancelled after \(sentCount) of \(sendTotal)"
                    : "google photos: uploaded \(items.count - failures) of \(items.count)")

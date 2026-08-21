@@ -1,6 +1,6 @@
 # GoProViewer
 
-Version **1.16.0**
+Version **1.18.0**
 
 A simple macOS app to browse, preview, and copy files your GoPro to your mac.
 
@@ -34,6 +34,36 @@ Connect your camera to your mac, turn your camera on, enjoy! that's it.
 - Default destination is `~/Movies/GoPro` (changeable in the sidebar or Settings).
 
 ## Changelog
+
+### 1.18.0
+
+**New**
+- **The upload card tells the whole story.** Under its bar — like the copy card — it now shows the file being sent with its own percentage, the live upload speed, and how much of the batch's data is already across. The *Uploaded to Google Photos* tally above it also spells out how many files are still to go. And when the connection to Google stalls, the card says "stalled — retrying" instead of leaving a frozen bar to stare at.
+- **Uploads finish sooner.** Files are registered with Google Photos in small batches instead of one round trip each — on a folder of photos that dead air was a big share of the total — and on a quick connection the app sends each file in bigger and bigger pieces, dropping back to careful small ones at the first sign of trouble.
+
+**Fixed**
+- The preview could show a photo tiny in the middle of the window, or — when stepping over from a video — keep the video's wide shape and leave black bars beside the photo. The window now always takes the shape of the item it's showing, and photos fill it edge to edge until you zoom in yourself.
+
+### 1.17.1
+
+**Fixed**
+- Uploads to Google Photos and copies to this Mac now go oldest to newest, regardless of how the grid is sorted — a batch fills your library chronologically, and if it's interrupted, everything before a clear point in time is already across.
+
+### 1.17.0
+
+**New**
+- **Step through your media from the keyboard or the trackpad.** In the preview, ← / → go to the previous or next item, and a two-finger horizontal swipe does the same — like Photos. `,` / `.` still work. Video seeking moved to ⇧← / ⇧→ (5 seconds); a photo you've zoomed into keeps the swipe for panning around it.
+- **The preview window sits still.** Every item now gets the same window height, centered on the screen with an even margin around it, and only the width follows the picture's shape (a clip too wide for the screen gives back a little height). Leaving full screen returns to that same centered spot.
+
+**Fixed**
+- Stepping quickly from item to item in the preview could crash the app, shrink the window to a sliver, or let it wander across the screen. The window's sizing was rebuilt so none of that can happen.
+
+### 1.16.1
+
+**Fixed**
+- *Select Missing Items* now works when browsing this Mac: it selects everything not yet uploaded to Google Photos, ready for the sidebar's Upload button. (It used to be always grayed out there, since nothing is ever "missing" from the very folder being browsed.) The ⌘⇧M menu item follows along, and works without a camera attached.
+- The View menu's *Only items not copied yet* used to empty the grid when browsing this Mac; it now shows the items not yet uploaded to Google Photos, and says so.
+- ⌘R now refreshes the file list when browsing this Mac, too.
 
 ### 1.16.0
 

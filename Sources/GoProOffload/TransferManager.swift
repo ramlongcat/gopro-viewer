@@ -62,7 +62,10 @@ final class TransferManager: ObservableObject {
         let includeRaw = Prefs.includeRaw
         let includeProxies = Prefs.includeProxies
         var pairs: [(String, TransferFile)] = []
-        for e in entries {
+        // Oldest first, whatever the grid's sort — the same waterline rule as
+        // Google Photos uploads: an interrupted batch leaves everything
+        // before a clear point in time already copied.
+        for e in entries.sorted(by: { $0.created < $1.created }) {
             for tf in e.transferFiles(includeRaw: includeRaw, includeProxies: includeProxies) {
                 pairs.append((e.id, tf))
             }

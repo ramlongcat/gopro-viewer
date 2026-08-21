@@ -30,6 +30,12 @@ enum ShowScope: String, CaseIterable, Identifiable {
     case all = "All items"
     case notCopied = "Only items not copied yet"
     var id: String { rawValue }
+
+    /// The raw values are stored in prefs, so the Mac library re-labels at
+    /// display time: there "done" means uploaded to Google Photos, not copied.
+    func title(for source: MediaSource) -> String {
+        self == .notCopied && source == .mac ? "Only items not uploaded yet" : rawValue
+    }
 }
 
 struct ViewerTarget: Identifiable, Equatable {
@@ -363,7 +369,10 @@ final class AppModel: ObservableObject {
             list = list.filter { Fmt.dayKey.string(from: $0.created) == dayFilter }
         }
         if showScope == .notCopied {
-            list = list.filter { !downloadedIDs.contains($0.id) }
+            // The mark, not downloadedIDs: when browsing the Mac every entry
+            // is "downloaded" by definition, and the scope means "not yet in
+            // Google Photos" there.
+            list = list.filter { !isMarked($0) }
         }
         // buildEntries already sorts newest-first.
         if sortOrder == .dateAscending { list.reverse() }
@@ -597,16 +606,30 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Entries not yet found at the destination — drives "Select N Missing
-    /// Items" in the Select menus.
+    /// Entries not yet at the far side of the source in view — not copied to
+    /// this Mac when browsing the camera, not sent to Google Photos when
+    /// browsing this Mac. Drives "Select N Missing Items" in the Select menus.
     var missingEntries: [MediaEntry] {
-        entries.filter { !downloadedIDs.contains($0.id) }
+        switch source {
+        case .camera:
+            return entries.filter { !downloadedIDs.contains($0.id) }
+        case .mac:
+            // Only entries an upload could still act on: at least one file
+            // Google Photos accepts that it hasn't been sent.
+            return entries.filter { entry in
+                GooglePhotos.sendables(of: entry).contains {
+                    !GooglePhotos.shared.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size))
+                }
+            }
+        }
     }
 
-    /// Selects everything not yet transferred; drops any active filter so the
-    /// selection is fully visible and the toolbar Transfer count matches.
+    /// Selects everything not yet transferred (or uploaded); drops any active
+    /// filter so the selection is fully visible and the toolbar Transfer /
+    /// sidebar Upload count matches.
     func selectMissing() {
         filter = .all
+        dayFilter = nil
         selection = Set(missingEntries.map(\.id))
         selectionAnchor = nil
         shiftBase = selection

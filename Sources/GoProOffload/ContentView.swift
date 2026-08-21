@@ -12,6 +12,10 @@ extension ShapeStyle where Self == AnyShapeStyle {
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var transfers: TransferManager
+    /// Observed here because the Select menu's missing count and the Show
+    /// scope depend on what Google Photos holds — finishing an upload must
+    /// refresh the toolbar, and AppModel doesn't republish those changes.
+    @ObservedObject private var google = GooglePhotos.shared
     @AppStorage("sidebarWidth") private var sidebarWidth = 255.0
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     @AppStorage(Prefs.kGridShowInfo) private var showInfo = false
@@ -123,7 +127,7 @@ struct ContentView: View {
                     .pickerStyle(.inline)
                     Divider()
                     Picker("Show", selection: $model.showScope) {
-                        ForEach(ShowScope.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(ShowScope.allCases) { Text($0.title(for: model.source)).tag($0) }
                     }
                     .pickerStyle(.inline)
                 } label: {

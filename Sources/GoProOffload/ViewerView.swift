@@ -56,8 +56,12 @@ struct ViewerView: View {
         // which would letterbox the media inside an exactly-fitted window.
         .ignoresSafeArea()
         .background(navShortcuts)
+        .onReceive(win.swipe) { navigate($0) }
         .onAppear { refit() }
         .onChange(of: aspect) { refit() }
+        // Two same-shape items don't change `aspect`, but the window should
+        // still return to its centered spot when stepping between them.
+        .onChange(of: entry?.id) { refit() }
         .onChange(of: entry?.displayName) { win.setTitle(entry?.displayName ?? "Preview") }
     }
 
@@ -79,11 +83,14 @@ struct ViewerView: View {
 
     private func toggleFullScreen() { win.toggleFullScreen() }
 
-    /// `,` / `.` step through the library and `<` / `>` do the same thing with
-    /// shift held — a shortcut matches modifiers exactly, so both need saying.
-    /// Arrows stay free for the player's seeking.
+    /// ← / → and `,` / `.` step through the library, and `<` / `>` do the
+    /// same with shift held — a shortcut matches modifiers exactly, so each
+    /// needs saying. Seeking lives on ⇧← / ⇧→ so the bare arrows can
+    /// navigate.
     private var navShortcuts: some View {
         Group {
+            Button("") { navigate(-1) }.keyboardShortcut(.leftArrow, modifiers: [])
+            Button("") { navigate(1) }.keyboardShortcut(.rightArrow, modifiers: [])
             Button("") { navigate(-1) }.keyboardShortcut(",", modifiers: [])
             Button("") { navigate(1) }.keyboardShortcut(".", modifiers: [])
             Button("") { navigate(-1) }.keyboardShortcut(",", modifiers: .shift)
@@ -150,16 +157,26 @@ struct ViewerView: View {
         .glassPill()
         .opacity(off ? 0.25 : 1)
         .disabled(off)
-        .help(delta < 0 ? "Previous (< or ,)" : "Next (> or .)")
+        .help(delta < 0 ? "Previous (← or ,) — or swipe" : "Next (→ or .) — or swipe")
+    }
+
+    /// Panes report their measured shape tagged with their own item, because
+    /// the outgoing pane of a slide transition is still alive: a departing
+    /// video's time observer gets one more tick in and would otherwise
+    /// overwrite the incoming photo's shape — leaving the photo pillarboxed
+    /// in a window fitted to the video.
+    private func setPaneAspect(_ a: CGFloat, from id: String) {
+        guard id == entry?.id else { return }
+        paneAspect = a
     }
 
     @ViewBuilder
     private func content(_ entry: MediaEntry) -> some View {
         switch entry.kind {
         case .video:
-            VideoPane(entry: entry, onAspect: { paneAspect = $0 }).id(entry.id)
+            VideoPane(entry: entry, onAspect: { setPaneAspect($0, from: entry.id) }).id(entry.id)
         case .photo(let f), .photoGroup(let f):
-            PhotoPane(file: f, onAspect: { paneAspect = $0 }).id(entry.id)
+            PhotoPane(file: f, onAspect: { setPaneAspect($0, from: entry.id) }).id(entry.id)
         case .other(let f):
             VStack(spacing: 10) {
                 Image(systemName: "doc").font(.largeTitle)
@@ -369,12 +386,12 @@ struct VideoPane: View {
         return 0
     }
 
-    /// The skip buttons are gone from the bar, but ←/→ still seek 5 seconds.
-    /// A zero-size button is the only way to carry a shortcut with no glyph.
+    /// ⇧←/⇧→ seek 5 seconds — the bare arrows step between items now. A
+    /// zero-size button is the only way to carry a shortcut with no glyph.
     private var seekShortcuts: some View {
         Group {
-            Button("") { step(-5) }.keyboardShortcut(.leftArrow, modifiers: [])
-            Button("") { step(5) }.keyboardShortcut(.rightArrow, modifiers: [])
+            Button("") { step(-5) }.keyboardShortcut(.leftArrow, modifiers: .shift)
+            Button("") { step(5) }.keyboardShortcut(.rightArrow, modifiers: .shift)
         }
         .frame(width: 0, height: 0)
         .opacity(0)
@@ -527,6 +544,46 @@ final class SmoothImageView: NSImageView {
     }
 }
 
+/// Scroll view that keeps the photo fitted — flush with the window's edges —
+/// until the user zooms. Fit is a standing mode, not a one-shot
+/// magnify(toFit:) on arrival: the window resizes itself to the photo's shape
+/// asynchronously (ViewerWindowController.fit) and the pane slides in inside
+/// a transition, so a single fit races both. Losing that race could run the
+/// fit against a not-yet-laid-out scroll view, clamp magnification to the
+/// minimum, and strand the photo tiny in the middle of the window for good.
+/// Re-fitting on every layout pass makes the end state deterministic whatever
+/// the order — and keeps the photo edge to edge through full screen and
+/// window resizes too.
+final class FitScrollView: NSScrollView {
+    var fitMode = true
+
+    override func layout() {
+        super.layout()
+        fitIfNeeded()
+    }
+
+    func fitIfNeeded() {
+        guard fitMode, let doc = documentView,
+              doc.frame.width > 0, doc.frame.height > 0 else { return }
+        let box = contentView.frame.size
+        guard box.width > 1, box.height > 1 else { return }
+        let target = min(box.width / doc.frame.width, box.height / doc.frame.height)
+        if abs(magnification - target) > 0.0005 { magnify(toFit: doc.frame) }
+    }
+
+    // A pinch (or a two-finger double-tap) is the user taking over; stop
+    // re-fitting underneath their fingers.
+    override func magnify(with event: NSEvent) {
+        fitMode = false
+        super.magnify(with: event)
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        fitMode = false
+        super.smartMagnify(with: event)
+    }
+}
+
 /// NSScrollView-backed image view: native trackpad pinch magnification,
 /// scroll-to-pan, and programmatic zoom for the toolbar buttons.
 struct ZoomableImageView: NSViewRepresentable {
@@ -536,13 +593,12 @@ struct ZoomableImageView: NSViewRepresentable {
     final class Coordinator {
         var lastImage: NSImage?
         var lastCommand: UUID?
-        var didInitialFit = false
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let sv = NSScrollView()
+    func makeNSView(context: Context) -> FitScrollView {
+        let sv = FitScrollView()
         let clip = CenteringClipView()
         clip.drawsBackground = true
         clip.backgroundColor = .black
@@ -566,7 +622,7 @@ struct ZoomableImageView: NSViewRepresentable {
         return sv
     }
 
-    func updateNSView(_ sv: NSScrollView, context: Context) {
+    func updateNSView(_ sv: FitScrollView, context: Context) {
         guard let iv = sv.documentView as? NSImageView else { return }
         let co = context.coordinator
 
@@ -575,11 +631,14 @@ struct ZoomableImageView: NSViewRepresentable {
             co.lastImage = image
             iv.image = image
             iv.frame = NSRect(origin: .zero, size: image.size)
-            if !co.didInitialFit {
-                co.didInitialFit = true
-                DispatchQueue.main.async { sv.magnify(toFit: iv.frame) }
+            if sv.fitMode {
+                // layout() re-fits; ask for a pass now so the new image
+                // never draws at the old one's scale.
+                sv.needsLayout = true
+                sv.fitIfNeeded()
             } else if let oldSize, oldSize.width > 0, image.size.width > 0 {
-                // Swapping preview for full-res: keep the on-screen size stable.
+                // Swapping preview for full-res mid-zoom: keep the on-screen
+                // size stable.
                 let center = NSPoint(x: sv.contentView.bounds.midX, y: sv.contentView.bounds.midY)
                 let scale = oldSize.width / image.size.width
                 sv.setMagnification(sv.magnification * scale,
@@ -590,14 +649,26 @@ struct ZoomableImageView: NSViewRepresentable {
         if let command, co.lastCommand != command.id {
             co.lastCommand = command.id
             let center = NSPoint(x: sv.contentView.bounds.midX, y: sv.contentView.bounds.midY)
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.22
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                switch command.action {
-                case .zoomIn: sv.animator().setMagnification(sv.magnification * 1.5, centeredAt: center)
-                case .zoomOut: sv.animator().setMagnification(sv.magnification / 1.5, centeredAt: center)
-                case .fit: sv.animator().magnify(toFit: iv.frame)
+            switch command.action {
+            case .zoomIn, .zoomOut:
+                sv.fitMode = false
+                let mag = command.action == .zoomIn ? sv.magnification * 1.5
+                                                    : sv.magnification / 1.5
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.22
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    sv.animator().setMagnification(mag, centeredAt: center)
                 }
+            case .fit:
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = 0.22
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    sv.animator().magnify(toFit: iv.frame)
+                }, completionHandler: {
+                    // Re-arm only once the animation lands, or the next
+                    // layout pass would snap straight past it.
+                    sv.fitMode = true
+                })
             }
         }
     }

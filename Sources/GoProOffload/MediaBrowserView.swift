@@ -156,6 +156,9 @@ private struct ClickCatcher: NSViewRepresentable {
 
 struct MediaBrowserView: View {
     @EnvironmentObject var model: AppModel
+    /// In the Mac library the "not copied yet" scope filters on what Google
+    /// Photos holds, so a finished upload must re-run the grid's filter.
+    @ObservedObject private var google = GooglePhotos.shared
 
     var body: some View {
         Group {
@@ -174,8 +177,13 @@ struct MediaBrowserView: View {
                 // "Only items not copied yet" emptying the grid is good news,
                 // not an empty card — say so, and say how to get back.
                 if model.showScope == .notCopied, !model.typeFilteredEntries.isEmpty {
-                    ContentUnavailableView("Everything is copied", systemImage: "checkmark.circle",
-                                           description: Text("Every item here is already at the destination. Pick View ▸ Show ▸ All items to see them again."))
+                    if model.source == .mac {
+                        ContentUnavailableView("Everything is uploaded", systemImage: "checkmark.circle",
+                                               description: Text("Every item here is already in Google Photos. Pick View ▸ Show ▸ All items to see them again."))
+                    } else {
+                        ContentUnavailableView("Everything is copied", systemImage: "checkmark.circle",
+                                               description: Text("Every item here is already at the destination. Pick View ▸ Show ▸ All items to see them again."))
+                    }
                 } else {
                     ContentUnavailableView("No media", systemImage: "camera",
                                            description: Text("Nothing on the card matches this filter."))

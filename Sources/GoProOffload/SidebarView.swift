@@ -91,17 +91,34 @@ struct SidebarView: View {
         }
     }
 
-    /// Local files that Google Photos hasn't been sent yet.
+    /// Local files that Google Photos hasn't been sent yet. Oldest first,
+    /// whatever the grid's sort: the library fills chronologically, and an
+    /// interrupted batch leaves a clean "everything before here" waterline.
     private func pendingUploads(_ entries: [MediaEntry]) -> [(url: URL, size: Int64)] {
-        entries.flatMap(GooglePhotos.sendables(of:))
+        entries.sorted { $0.created < $1.created }
+            .flatMap(GooglePhotos.sendables(of:))
             .filter { !google.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size)) }
             .map { (URL(fileURLWithPath: $0.path), $0.size) }
     }
 
-    /// The Sync Status card's live state while a batch is going up: the file
-    /// in flight, its bar, and a cancel.
+    /// The Sync Status card's live state while a batch is going up: the
+    /// count, its bar, a cancel — and under the bar the same note line the
+    /// copy card carries (file · speed · progress), so the two transfer
+    /// gauges read as one family.
     private var uploadProgress: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        var note = google.sendingName
+        // The file's own percent, worded like the grid tile's badge — the bar
+        // above is the whole batch, and during one long clip it barely moves.
+        note += " · \(Int((google.sendingFraction * 100).rounded()))%"
+        if let stall = google.sendingNote {
+            note += " · \(stall)"
+        } else if google.sendSpeed > 0 {
+            note += " · \(Fmt.speed(google.sendSpeed))"
+        }
+        if google.sendTotalBytes > 0 {
+            note += " · \(Fmt.size(min(google.sendDoneBytes + google.sendingBytes, google.sendTotalBytes))) of \(Fmt.size(google.sendTotalBytes))"
+        }
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 // Same spinner as the location panel while it reads GPS.
                 ProgressView()
@@ -116,17 +133,17 @@ struct SidebarView: View {
                 .foregroundStyle(.secondary)
                 .help("Stop uploading")
             }
-            Text(google.sendingName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
             // Whole files done plus the fraction of the one in flight,
             // so the bar moves during a long clip instead of per file.
             ProgressView(value: min(Double(max(1, google.sendTotal)),
                                     Double(google.sentCount) + google.sendingFraction),
                          total: Double(max(1, google.sendTotal)))
                 .controlSize(.small)
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -356,11 +373,13 @@ struct SidebarView: View {
             // that says everything is up while an item is missing is a lie.
             // A cloud rather than the provider's logo, so another photo
             // service can join Google Photos without the UI changing.
+            let left = all.count - done
             SidebarMetric(icon: "cloud",
                           title: "Uploaded to Google Photos",
                           value: "\(Int(fraction * 100))%",
                           fraction: fraction,
-                          subtitle: "\(done) of \(all.count) files")
+                          subtitle: "\(done) of \(all.count) files"
+                              + (left > 0 ? " (\(left) remaining)" : ""))
         }
     }
 

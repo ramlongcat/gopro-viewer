@@ -68,11 +68,11 @@ Field names in `/gopro/media/info` are undocumented in GoPro's HTTP spec but ful
 
 The browser is the SwiftUI `WindowGroup` (`ContentView` → sidebar + `MediaBrowserView` grid + trailing `.inspector` column holding `MediaDetailView`).
 
-The viewer is **not** a sheet: `ViewerWindowController` (`ViewerWindow.swift`) hosts `ViewerView` in its own borderless `NSWindow`. Two AppKit constraints drove that and both still hold — a window with a sheet attached refuses to enter full screen, and only a real window can be sized to the media's aspect ratio. The controller owns the window, its full-screen state, the idle-pointer timer that fades the floating controls, and `fit(aspect:)`, which sets the content size and locks `contentAspectRatio` so nothing letterboxes. `ContentView` opens and closes it by observing `model.viewer`.
+The viewer is **not** a sheet: `ViewerWindowController` (`ViewerWindow.swift`) hosts `ViewerView` in its own borderless `NSWindow`. Two AppKit constraints drove that and both still hold — a window with a sheet attached refuses to enter full screen, and only a real window can be sized to the media's aspect ratio. The controller owns the window, its full-screen state, the idle-pointer timer that fades the floating controls, and `fit(aspect:)`, which gives every item the same screen-derived height, centers the window, and locks `contentAspectRatio` so nothing letterboxes. `fit` must stay deterministic (never derived from the current frame) and must apply off a `DispatchQueue.main.async` hop: a frame change inside a SwiftUI animated transaction gets replayed by `NSHostingView`'s animated window sizing mid-layout, which macOS 26 answers with an `NSException`. `ContentView` opens and closes it by observing `model.viewer`.
 
 `ViewerView` must keep `.ignoresSafeArea()`: the window hides its titlebar but SwiftUI still insets for it, which reintroduces bars inside an exactly-fitted window.
 
-Keyboard in that window runs on `.keyboardShortcut`, not `.onKeyPress` — nothing in an `NSHostingView` holds SwiftUI focus reliably, so shortcuts with no visible control (←/→ seeking, `,`/`.` navigation) hang off zero-size hidden buttons. Shortcuts match modifiers exactly, so a shifted variant (`<`, `>`) needs its own button.
+Keyboard in that window runs on `.keyboardShortcut`, not `.onKeyPress` — nothing in an `NSHostingView` holds SwiftUI focus reliably, so shortcuts with no visible control (←/→ and `,`/`.` navigation, ⇧←/⇧→ seeking) hang off zero-size hidden buttons. Shortcuts match modifiers exactly, so a shifted variant (`<`, `>`) needs its own button.
 
 ### Playback quality split
 
