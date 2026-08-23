@@ -101,29 +101,26 @@ struct SidebarView: View {
             .map { (URL(fileURLWithPath: $0.path), $0.size) }
     }
 
-    /// The Sync Status card's live state while a batch is going up: the
-    /// count, its bar, a cancel — and under the bar the same note line the
-    /// copy card carries (file · speed · progress), so the two transfer
-    /// gauges read as one family.
+    /// The Sync Status card's live state while a batch is going up: count,
+    /// bar and cancel, a batch line (speed · data progress), then one line
+    /// per file in flight — several at once on a parallel link, each with
+    /// its own percent and, when troubled, its own countdown. Clicking the
+    /// block scrolls the grid to the first file being sent.
     private var uploadProgress: some View {
-        var note = google.sendingName
-        // The file's own percent, worded like the grid tile's badge — the bar
-        // above is the whole batch, and during one long clip it barely moves.
-        note += " · \(Int((google.sendingFraction * 100).rounded()))%"
-        if let stall = google.sendingNote {
-            note += " · \(stall)"
-        } else if google.sendSpeed > 0 {
-            note += " · \(Fmt.speed(google.sendSpeed))"
-        }
+        let files = google.inFlight.values.sorted { $0.ordinal < $1.ordinal }
+        let flightBytes = files.reduce(Int64(0)) { $0 + $1.bytes }
+        let flightFraction = files.reduce(0.0) { $0 + $1.fraction }
+        var batchNote = google.sendSpeed > 0 ? Fmt.speed(google.sendSpeed) : ""
         if google.sendTotalBytes > 0 {
-            note += " · \(Fmt.size(min(google.sendDoneBytes + google.sendingBytes, google.sendTotalBytes))) of \(Fmt.size(google.sendTotalBytes))"
+            batchNote += (batchNote.isEmpty ? "" : " · ")
+                + "\(Fmt.size(min(google.sendDoneBytes + flightBytes, google.sendTotalBytes))) of \(Fmt.size(google.sendTotalBytes))"
         }
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 // Same spinner as the location panel while it reads GPS.
                 ProgressView()
                     .controlSize(.small)
-                Text("Uploading \(min(google.sentCount + 1, google.sendTotal)) of \(google.sendTotal)")
+                Text("Uploading \(min(google.sentCount + files.count, google.sendTotal)) of \(google.sendTotal)")
                     .font(.callout)
                 Spacer(minLength: 4)
                 Button { google.cancelUpload() } label: {
@@ -133,18 +130,31 @@ struct SidebarView: View {
                 .foregroundStyle(.secondary)
                 .help("Stop uploading")
             }
-            // Whole files done plus the fraction of the one in flight,
-            // so the bar moves during a long clip instead of per file.
+            // Whole files done plus the fractions in flight, so the bar
+            // moves during long clips instead of per file.
             ProgressView(value: min(Double(max(1, google.sendTotal)),
-                                    Double(google.sentCount) + google.sendingFraction),
+                                    Double(google.sentCount) + flightFraction),
                          total: Double(max(1, google.sendTotal)))
                 .controlSize(.small)
-            Text(note)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            if !batchNote.isEmpty {
+                Text(batchNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(files, id: \.name) { f in
+                Text("\(f.name) · \(Int((f.fraction * 100).rounded()))%"
+                     + (f.note.map { " · \($0)" } ?? ""))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let first = files.first { model.reveal(fileNamed: first.name) }
+        }
+        .help("Click to show in the grid")
     }
 
     /// The local source's primary action: send what's selected to Google

@@ -195,6 +195,21 @@ struct MediaBrowserView: View {
     }
 
     private var grid: some View {
+        ScrollViewReader { proxy in
+            scrollBody
+                .onChange(of: model.revealID) { _, id in
+                    // One-shot request from the sidebar's transfer cards;
+                    // clearing it lets the same item be revealed twice.
+                    guard let id else { return }
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                    model.revealID = nil
+                }
+        }
+    }
+
+    private var scrollBody: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 250), spacing: 12)],
                       spacing: 14, pinnedViews: [.sectionHeaders]) {
@@ -626,9 +641,10 @@ struct MediaCell: View {
             return "Copying… \(Int(min(1, Double(transfers.currentFileBytes) / Double(size)) * 100))%"
         }
         if model.source == .mac, google.sending,
-           GooglePhotos.sendables(of: entry)
-               .contains(where: { GooglePhotos.key(name: $0.name, size: $0.size) == google.sendingKey }) {
-            return "Uploading… \(Int((google.sendingFraction * 100).rounded()))%"
+           let f = GooglePhotos.sendables(of: entry)
+               .compactMap({ google.inFlight[GooglePhotos.key(name: $0.name, size: $0.size)] })
+               .first {
+            return "Uploading… \(Int((f.fraction * 100).rounded()))%"
         }
         return nil
     }

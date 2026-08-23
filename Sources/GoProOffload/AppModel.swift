@@ -83,6 +83,9 @@ final class AppModel: ObservableObject {
     /// Camera or this Mac. Switching reloads the grid from the other side.
     @Published var source: MediaSource = .camera
     @Published var viewer: ViewerTarget?
+    /// One-shot scroll request: the grid centers this entry, then clears it.
+    /// Set by the sidebar's transfer cards (click → show me the file moving).
+    @Published var revealID: String?
     @Published var mediaInfo: [String: MediaInfoLite] = [:]
     @Published var downloadedIDs = Set<String>()
     /// Where each copied entry was actually found — the badge tooltip names
@@ -634,6 +637,26 @@ final class AppModel: ObservableObject {
         selectionAnchor = nil
         shiftBase = selection
         AppLog.log("selectMissing: \(selection.count)")
+    }
+
+    /// The sidebar's transfer cards are clickable: find the entry that owns
+    /// a moving file — chapters and their proxies included — and ask the
+    /// grid to scroll there. A day filter hiding the entry is lifted; the
+    /// click means "show me", not "show me if convenient".
+    func reveal(fileNamed name: String) {
+        let entry = entries.first { entry in
+            switch entry.kind {
+            case .video(let chapters):
+                return chapters.contains { $0.name == name || $0.lrvName == name || $0.thmName == name }
+            case .photo(let f), .photoGroup(let f), .other(let f):
+                return f.name == name
+            }
+        }
+        guard let entry else { return }
+        if !sections.contains(where: { $0.entries.contains { $0.id == entry.id } }) {
+            dayFilter = nil
+        }
+        revealID = entry.id
     }
 
     func downloadSelected() {

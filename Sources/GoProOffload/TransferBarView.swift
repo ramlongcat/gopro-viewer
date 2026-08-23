@@ -3,6 +3,7 @@ import SwiftUI
 /// Compact transfer progress / summary block for the sidebar bottom.
 struct SidebarTransferStatus: View {
     @EnvironmentObject var transfers: TransferManager
+    @EnvironmentObject var model: AppModel
 
     var body: some View {
         switch transfers.phase {
@@ -33,6 +34,11 @@ struct SidebarTransferStatus: View {
             Button("Cancel") { transfers.cancel() }
                 .controlSize(.small)
         }
+        // Same affordance as the upload card: the block is a link to the
+        // very tile being copied.
+        .contentShape(Rectangle())
+        .onTapGesture { model.reveal(fileNamed: transfers.currentName) }
+        .help("Click to show in the grid")
     }
 
     private var finished: some View {

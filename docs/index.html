@@ -6,6 +6,8 @@
 <title>GoProViewer</title>
 <meta name="description" content="A free macOS app to browse, preview, and copy files from your GoPro over USB — and send them to Google Photos.">
 <link rel="icon" type="image/png" href="icon.png">
+<!-- Google Search Console site-verification <meta> tag goes here (Search Console → add
+     URL-prefix property for https://ramlongcat.github.io/gopro-viewer/ → HTML tag method). -->
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -21,7 +23,10 @@
   }
   a { color: #0066cc; text-decoration: none; }
   a:hover { text-decoration: underline; }
-  h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 0.4rem; }
+  h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 0.4rem;
+       display: flex; align-items: center; gap: 0.65rem; }
+  h1 img { width: 52px; height: 52px; }
+  h2 { font-size: 1.25rem; margin: 2.4rem 0 0.6rem; }
   .tagline { color: #6e6e73; font-size: 1.1rem; margin: 0 0 1.5rem; }
   .actions { margin: 1.5rem 0 2rem; }
   .btn {
@@ -38,7 +43,7 @@
 </style>
 </head>
 <body>
-<h1>GoProViewer</h1>
+<h1><img src="icon.png" alt="">GoProViewer</h1>
 <p class="tagline">A free macOS app to browse, preview, and copy files from your GoPro to your Mac.
 Plug the camera in over USB, turn it on — that's it.</p>
 
@@ -49,6 +54,11 @@ Plug the camera in over USB, turn it on — that's it.</p>
 
 <img class="shot" src="https://raw.githubusercontent.com/ramlongcat/gopro-viewer/main/screenshot.png"
      alt="GoProViewer's browser window: a thumbnail grid of GoPro clips grouped by day, with a sidebar showing battery, storage, and copy progress.">
+
+<h2>What GoProViewer does</h2>
+<p>GoProViewer does one job: it gets footage off a GoPro camera. Plug the camera into your Mac over
+USB and the app shows everything on it, plays anything instantly, and copies what you choose — to a
+folder on your Mac, to your Google Photos library, or both.</p>
 
 <ul>
   <li>Thumbnail grid grouped by capture day — chaptered videos and bursts appear as single items.</li>
@@ -62,8 +72,27 @@ Plug the camera in over USB, turn it on — that's it.</p>
 <p>Works with any camera that speaks Open GoPro over USB — HERO10 Black and later, HERO11 Mini,
 HERO12, HERO13, MAX 2 — on Apple Silicon Macs running macOS 14 or newer.</p>
 
+<h2>Google Photos and your data</h2>
+<p>Uploading to Google Photos is optional and off until you connect a Google account. When you do,
+GoProViewer asks Google for exactly two permissions:</p>
+<ul>
+  <li><strong>Add to your Google Photos library</strong> (<em>photoslibrary.appendonly</em>) — used
+  only to upload the photos and videos you select. This permission cannot list, view, edit, share,
+  or delete anything already in your library, including items the app itself uploaded.</li>
+  <li><strong>Basic profile (email address)</strong> — used only to show which account is connected
+  in the app's settings.</li>
+</ul>
+<p>Uploads travel directly from your Mac to Google Photos over an encrypted connection; nothing
+passes through any other server, because there are none — the app has no analytics, no tracking,
+and no servers of its own. Your Google sign-in token is stored in the macOS Keychain and never
+leaves your Mac. Full details are in the
+<a href="https://ramlongcat.github.io/gopro-viewer/privacy.html">Privacy Policy</a>, and you can
+revoke the app's access at any time from your
+<a href="https://myaccount.google.com/permissions">Google Account</a>.</p>
+
 <footer>
-  <a href="privacy.html">Privacy Policy</a> · <a href="terms.html">Terms of Service</a> ·
+  <a href="https://ramlongcat.github.io/gopro-viewer/privacy.html">Privacy Policy</a> ·
+  <a href="https://ramlongcat.github.io/gopro-viewer/terms.html">Terms of Service</a> ·
   <a href="https://github.com/ramlongcat/gopro-viewer/issues">Support</a><br>
   GoProViewer is an independent, free project — not affiliated with, endorsed by, or sponsored by
   GoPro, Inc. or Google LLC. GoPro and Google Photos are trademarks of their respective owners.
