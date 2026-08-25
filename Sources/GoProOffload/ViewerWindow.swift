@@ -209,13 +209,15 @@ final class ViewerWindowController: NSObject, ObservableObject, NSWindowDelegate
         }
     }
 
-    /// True if some scroll view in the window has horizontal room to pan —
-    /// a zoomed-in photo. (Reading NSScrollView's own geometry is fine; the
-    /// grid's no-frame-geometry rule is about SwiftUI-scrolled overlays,
-    /// which this window has none of.)
+    /// True if the photo pane has horizontal room to pan — a zoomed-in
+    /// photo. Only FitScrollView counts: it is the one pannable surface in
+    /// this window, and matching any NSScrollView let framework internals
+    /// (AVKit, hosting-view scrollers) veto the swipe. (Reading the scroll
+    /// view's own geometry is fine; the grid's no-frame-geometry rule is
+    /// about SwiftUI-scrolled overlays, which this window has none of.)
     private func canPanHorizontally(_ view: NSView?) -> Bool {
         guard let view else { return false }
-        if let sv = view as? NSScrollView, let doc = sv.documentView,
+        if let sv = view as? FitScrollView, let doc = sv.documentView,
            doc.frame.width > sv.contentView.bounds.width + 1 {
             return true
         }

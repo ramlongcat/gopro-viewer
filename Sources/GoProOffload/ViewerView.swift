@@ -113,10 +113,14 @@ struct ViewerView: View {
     }
 
     private func actionPill(_ entry: MediaEntry?) -> some View {
+        // Every glyph gets a real hit box (.plain buttons only hit-test drawn
+        // pixels), sized so the gaps between neighbours stay unambiguous.
         HStack(spacing: 18) {
             if let entry, !model.downloadedIDs.contains(entry.id) {
                 Button { model.download(entry) } label: {
                     Image(systemName: "square.and.arrow.down")
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
                 }
                 .help("Copies only the item shown here — use the sidebar's Copy button for a selection")
                 .disabled(transfers.isActive)
@@ -126,10 +130,14 @@ struct ViewerView: View {
                 Image(systemName: isFullScreen
                       ? "arrow.down.right.and.arrow.up.left"
                       : "arrow.up.left.and.arrow.down.right")
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
             }
             .help(isFullScreen ? "Leave full screen" : "Full screen")
             Button { model.viewer = nil } label: {
                 Image(systemName: "xmark")
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
             }
             .help("Close (Esc)")
             .keyboardShortcut(.cancelAction)
@@ -152,6 +160,10 @@ struct ViewerView: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 46, height: 46)
+                // A .plain button hit-tests only its drawn pixels — without
+                // this, the pill responded to nothing but the chevron's
+                // strokes.
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .glassPill()
@@ -312,6 +324,7 @@ private struct TransportBar: View {
                     .font(.system(size: 24))
                     .foregroundStyle(Color.accentColor)
                     .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.space, modifiers: [])
@@ -578,6 +591,18 @@ final class FitScrollView: NSScrollView {
         super.magnify(with: event)
     }
 
+    // Two jobs. Overriding scrollWheel at all opts this scroll view out of
+    // AppKit's "responsive scrolling", which tracks the gesture off the main
+    // event path — that is what starved the window's swipe monitor and made
+    // two-finger navigation dead over photos. And at fit there is nothing to
+    // pan, so the event is swallowed rather than elastic-bounced; zoomed in,
+    // scrolling pans exactly as before (the monitor already yields to a
+    // pannable photo).
+    override func scrollWheel(with event: NSEvent) {
+        if fitMode { return }
+        super.scrollWheel(with: event)
+    }
+
     override func smartMagnify(with event: NSEvent) {
         fitMode = false
         super.smartMagnify(with: event)
@@ -721,16 +746,30 @@ struct PhotoPane: View {
     }
 
     private var controls: some View {
+        // Same hit-box treatment as the top pill: .plain buttons only
+        // hit-test their drawn pixels without the contentShape.
         HStack(spacing: 18) {
-            Button { zoom = .make(.zoomOut) } label: { Image(systemName: "minus.magnifyingglass") }
-                .keyboardShortcut("-", modifiers: .command)
-                .help("Zoom out (⌘−)")
-            Button { zoom = .make(.fit) } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
-                .keyboardShortcut("0", modifiers: .command)
-                .help("Fit to window (⌘0)")
-            Button { zoom = .make(.zoomIn) } label: { Image(systemName: "plus.magnifyingglass") }
-                .keyboardShortcut("=", modifiers: .command)
-                .help("Zoom in (⌘+) — trackpad pinch works too")
+            Button { zoom = .make(.zoomOut) } label: {
+                Image(systemName: "minus.magnifyingglass")
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .keyboardShortcut("-", modifiers: .command)
+            .help("Zoom out (⌘−)")
+            Button { zoom = .make(.fit) } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .keyboardShortcut("0", modifiers: .command)
+            .help("Fit to window (⌘0)")
+            Button { zoom = .make(.zoomIn) } label: {
+                Image(systemName: "plus.magnifyingglass")
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .keyboardShortcut("=", modifiers: .command)
+            .help("Zoom in (⌘+) — trackpad pinch works too")
             Divider().frame(height: 20)
             // Nothing to say once the real thing is on screen.
             if !fullLoaded {

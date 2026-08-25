@@ -477,10 +477,18 @@ struct MediaCell: View {
                 let files = targets.flatMap { GooglePhotos.sendables(of: $0) }
                 if !files.isEmpty {
                     let allUp = files.allSatisfy {
-                        google.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size))
+                        google.uploaded[GooglePhotos.key(name: $0.name, size: $0.size)] != nil
                     }
                     let count = targets.count > 1 ? " (\(targets.count))" : ""
                     Divider()
+                    // Front of the queue, not just "eventually": mid-batch it
+                    // jumps ahead of everything still waiting, otherwise it
+                    // starts a batch of its own.
+                    if google.isSignedIn, !allUp {
+                        Button("Upload to Google Photos Now\(count)") {
+                            google.uploadNow(files.map { (URL(fileURLWithPath: $0.path), $0.size) })
+                        }
+                    }
                     Button(allUp ? "Mark as Not in Google Photos\(count)"
                                  : "Mark as Already in Google Photos\(count)") {
                         google.setUploaded(!allUp, files: files)
@@ -545,10 +553,10 @@ struct MediaCell: View {
     /// outright (it puts the camera in turbo mode).
     private func startHoverPlay() {
         // No proxy (photos, and some video modes) means nothing to preview.
-        // On the camera a running copy owns the link outright; a local file
-        // is always readable.
+        // On the camera a running copy owns the link outright (a paused one
+        // has handed it back); a local file is always readable.
         guard let url = model.hoverURL(entry) else { return }
-        guard model.source == .mac || !model.transfers.isActive else { return }
+        guard model.source == .mac || !model.transfers.holdsCamera else { return }
         hover.start(url: url)
     }
 

@@ -130,7 +130,7 @@ final class AppModel: ObservableObject {
         loopTask = Task { [weak self] in
             while let self, !Task.isCancelled {
                 if self.connState == .connected {
-                    if !self.transfers.isActive {
+                    if !self.transfers.holdsCamera {
                         if self.usbLinked {
                             // Idle means idle on USB: no camera traffic at all.
                             // Unplugging is noticed locally via the interface.
@@ -154,7 +154,7 @@ final class AppModel: ObservableObject {
     /// One-shot status fetch on connect, app activation, refresh, and after
     /// transfers — the app never polls an idle camera.
     func refreshState() async {
-        guard let client, connState == .connected, !transfers.isActive else { return }
+        guard let client, connState == .connected, !transfers.holdsCamera else { return }
         if let s = try? await client.state() {
             status = s
             if let pct = s.batteryPercent { noteBattery(pct) }
@@ -265,6 +265,11 @@ final class AppModel: ObservableObject {
     }
 
     private func disconnect() {
+        // A paused batch would otherwise sit forever aimed at a camera that
+        // is gone; cancelling settles it honestly. (A *running* batch never
+        // reaches here — the liveness loop stands down while bytes move, and
+        // an unplug fails the transfer on its own.)
+        if transfers.isActive { transfers.cancel() }
         client = nil
         info = nil
         status = nil
@@ -323,7 +328,70 @@ final class AppModel: ObservableObject {
         selection = selection.filter { id in entries.contains { $0.id == id } }
         // "Already copied" is what this source *is*; every item counts.
         downloadedIDs = Set(entries.map(\.id))
+        seedLocalInfo()
         loadingMedia = false
+    }
+
+    // MARK: Local media info
+
+    /// Per-file duration/resolution for the Mac library, keyed "name|size"
+    /// and kept for good: reading it means opening the file with
+    /// AVFoundation, far too slow to redo per scroll — worse, every answer
+    /// used to publish `mediaInfo` and re-evaluate the whole grid, which is
+    /// what made scrolling the library stutter. An empty record means the
+    /// file was tried and had nothing to say — so it is never tried again.
+    private var localInfoCache: [String: MediaInfoLite] = [:]
+    private var localInfoLoaded = false
+
+    private static var localInfoFile: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("GoProOffload/mediainfo-local.json")
+    }
+
+    private static func fileKey(_ f: CameraFile) -> String { "\(f.name)|\(f.size)" }
+
+    /// Everything the cache already answers, applied in a single publish —
+    /// after the first pass over a library, scrolling costs no AVFoundation
+    /// work and no per-cell grid invalidations at all.
+    private func seedLocalInfo() {
+        if !localInfoLoaded {
+            localInfoLoaded = true
+            if let data = try? Data(contentsOf: Self.localInfoFile),
+               let cached = try? JSONDecoder().decode([String: MediaInfoLite].self, from: data) {
+                localInfoCache = cached
+            }
+        }
+        var seeded = mediaInfo
+        for e in entries where e.isVideo && seeded[e.id] == nil {
+            if case .video(let chapters) = e.kind, let folded = foldLocalInfo(chapters) {
+                seeded[e.id] = folded
+            }
+        }
+        mediaInfo = seeded
+    }
+
+    /// Nil while any chapter hasn't been read yet; an unreadable chapter
+    /// (empty record) doesn't block the others, mirroring the fetch path.
+    private func foldLocalInfo(_ chapters: [CameraFile]) -> MediaInfoLite? {
+        var combined = MediaInfoLite()
+        var first = true
+        for ch in chapters {
+            guard let mi = localInfoCache[Self.fileKey(ch)] else { return nil }
+            guard mi != MediaInfoLite() else { continue }
+            if first { combined = mi; first = false }
+            else { combined.duration = (combined.duration ?? 0) + (mi.duration ?? 0) }
+        }
+        return combined == MediaInfoLite() ? nil : combined
+    }
+
+    private func saveLocalInfoCache() {
+        let snapshot = localInfoCache
+        let url = Self.localInfoFile
+        Task.detached(priority: .utility) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? JSONEncoder().encode(snapshot).write(to: url)
+        }
     }
 
     /// Where a file's bytes live for the source in view — an HTTP URL on the
@@ -408,19 +476,29 @@ final class AppModel: ObservableObject {
               !infoFetches.contains(entry.id),
               case .video(let chapters) = entry.kind else { return }
         if source == .mac {
+            // The cache answers instantly, with no publish churn; only files
+            // never seen before are worth an AVFoundation pass.
+            if let folded = foldLocalInfo(chapters) {
+                mediaInfo[entry.id] = folded
+                return
+            }
             infoFetches.insert(entry.id)
             Task {
-                var combined = MediaInfoLite()
-                for ch in chapters {
-                    guard let mi = await LocalLibrary.info(for: URL(fileURLWithPath: ch.path)) else { continue }
-                    if combined == MediaInfoLite() { combined = mi }
-                    else { combined.duration = (combined.duration ?? 0) + (mi.duration ?? 0) }
+                var learned = false
+                for ch in chapters where localInfoCache[Self.fileKey(ch)] == nil {
+                    // An unreadable file becomes an empty record on purpose:
+                    // "tried, nothing there" must be remembered, or every
+                    // launch would re-open it just to fail again.
+                    let mi = await LocalLibrary.info(for: URL(fileURLWithPath: ch.path))
+                    localInfoCache[Self.fileKey(ch)] = mi ?? MediaInfoLite()
+                    learned = true
                 }
-                if combined != MediaInfoLite() { mediaInfo[entry.id] = combined }
+                if let folded = foldLocalInfo(chapters) { mediaInfo[entry.id] = folded }
+                if learned { saveLocalInfoCache() }
             }
             return
         }
-        guard let client, !transfers.isActive else { return }
+        guard let client, !transfers.holdsCamera else { return }
         infoFetches.insert(entry.id)
         Task {
             var combined = MediaInfoLite()
@@ -540,7 +618,7 @@ final class AppModel: ObservableObject {
             let sendable = GooglePhotos.sendables(of: entry)
             guard !sendable.isEmpty else { return false }
             return sendable.allSatisfy {
-                GooglePhotos.shared.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size))
+                GooglePhotos.shared.uploaded[GooglePhotos.key(name: $0.name, size: $0.size)] != nil
             }
         }
     }
@@ -621,7 +699,7 @@ final class AppModel: ObservableObject {
             // Google Photos accepts that it hasn't been sent.
             return entries.filter { entry in
                 GooglePhotos.sendables(of: entry).contains {
-                    !GooglePhotos.shared.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size))
+                    GooglePhotos.shared.uploaded[GooglePhotos.key(name: $0.name, size: $0.size)] == nil
                 }
             }
         }

@@ -45,13 +45,22 @@ final class TransferManager: ObservableObject {
     @Published var speed: Double = 0
     @Published var failures: [String] = []
     @Published var wasCancelled = false
+    @Published private(set) var isPaused = false
 
     weak var model: AppModel?
 
     var isActive: Bool { phase == .running }
+    /// True while bytes are actually moving. Everything that stands down to
+    /// keep off the camera's link (thumbnails, hover previews, status pings)
+    /// keys off this rather than isActive, so a paused batch gives the
+    /// camera back: turbo is lifted for the duration and browsing works.
+    var holdsCamera: Bool { phase == .running && !isPaused }
     var fileCount: Int { jobs.count }
 
     private var runTask: Task<Void, Never>?
+    /// The fetch in flight, kept so pause() can abort its network task
+    /// without cancelling the whole run.
+    private var activeDownload: Downloader?
     private var speedWindow: [(Date, Int64)] = []
     /// Snapshot of files already present under the destination base, so
     /// already-copied media is skipped wherever it lives.
@@ -96,6 +105,7 @@ final class TransferManager: ObservableObject {
         AppLog.log("transfer start: \(newJobs.count) jobs [\(newJobs.map(\.file.name).joined(separator: " "))]")
         jobs = newJobs
         phase = .running
+        isPaused = false
         wasCancelled = false
         failures = []
         filesDone = 0
@@ -111,6 +121,23 @@ final class TransferManager: ObservableObject {
 
     func cancel() {
         runTask?.cancel()
+    }
+
+    /// Stops the bytes without giving up the queue: the request in flight is
+    /// aborted (its .part file keeps what arrived — resume re-requests the
+    /// rest by Range), turbo is lifted so the camera answers the rest of the
+    /// app again, and the run loop parks until resume().
+    func pause() {
+        guard phase == .running, !isPaused else { return }
+        isPaused = true
+        activeDownload?.abort()
+        AppLog.log("transfer paused")
+    }
+
+    func resume() {
+        guard isPaused else { return }
+        isPaused = false
+        AppLog.log("transfer resumed")
     }
 
     func dismiss() {
@@ -154,6 +181,7 @@ final class TransferManager: ObservableObject {
 
         for idx in jobs.indices {
             if jobs[idx].state == .skipped { continue }
+            if isPaused { await holdWhilePaused(client: client, turbo: useTurbo) }
             if Task.isCancelled {
                 wasCancelled = true
                 for rest in idx..<jobs.count where jobs[rest].state == .pending {
@@ -166,7 +194,20 @@ final class TransferManager: ObservableObject {
             currentName = job.file.name
             currentFileBytes = 0
             do {
-                let appearedMeanwhile = try await download(job, client: client)
+                var appearedMeanwhile = false
+                while true {
+                    do {
+                        appearedMeanwhile = try await download(job, client: client)
+                        break
+                    } catch where isPaused && !Task.isCancelled {
+                        // pause() aborted the request mid-file; the .part
+                        // keeps its bytes. Park, then take the same job
+                        // again — the Range header continues where it
+                        // stopped.
+                        await holdWhilePaused(client: client, turbo: useTurbo)
+                        if Task.isCancelled { throw CancellationError() }
+                    }
+                }
                 if appearedMeanwhile {
                     // Landed on disk after the pre-pass — drop it from the totals.
                     AppLog.log("  \(job.file.name): already present")
@@ -210,9 +251,26 @@ final class TransferManager: ObservableObject {
 
         if useTurbo { await client.setTurbo(false) }
         speed = 0
+        isPaused = false
         phase = .finished
         AppLog.log("transfer finished: \(summaryLine)")
         model?.transfersFinished()
+    }
+
+    /// Parks the run loop while paused. Turbo comes off for the wait — turbo
+    /// mode makes the camera deaf to everything else, and the point of a
+    /// pause is that the app (thumbnails, previews) works meanwhile — and
+    /// goes back on before the queue moves again. A cancel mid-pause falls
+    /// straight through via task cancellation.
+    private func holdWhilePaused(client: GoProClient, turbo: Bool) async {
+        guard isPaused else { return }
+        speed = 0
+        speedWindow = []
+        if turbo { await client.setTurbo(false) }
+        while isPaused, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        if turbo, !Task.isCancelled { await client.setTurbo(true) }
     }
 
     /// Returns true if the file was already present with the right size.
@@ -226,10 +284,16 @@ final class TransferManager: ObservableObject {
         let url = client.downloadURL(path: job.file.cameraPath)
 
         let throttle = Throttle()
-        try await Downloader.fetch(url: url, partURL: part) { [weak self] bytes in
+        let dl = Downloader(partURL: part) { [weak self] bytes in
             guard throttle.fire() else { return }
             Task { @MainActor [weak self] in self?.updateProgress(bytes) }
         }
+        activeDownload = dl
+        defer { activeDownload = nil }
+        // pause() may have landed before this fetch existed to abort; both
+        // run on the main actor, so this check closes that gap exactly.
+        if isPaused { dl.abort() }
+        try await dl.run(url: url)
 
         if let expected = job.file.size {
             let actual = (try? fm.attributesOfItem(atPath: part.path)[.size] as? NSNumber)?.int64Value ?? 0

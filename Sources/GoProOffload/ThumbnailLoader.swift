@@ -49,7 +49,9 @@ final class ThumbnailLoader: @unchecked Sendable {
     }
 
     private func isPaused() async -> Bool {
-        await MainActor.run { transfers?.isActive ?? false }
+        // holdsCamera, not isActive: a *paused* batch has lifted turbo and
+        // given the link back, and thumbnails are half the point of pausing.
+        await MainActor.run { transfers?.holdsCamera ?? false }
     }
 
     private func fetch(key: String, cachedOnDisk: Bool, trim: Bool,

@@ -60,9 +60,11 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // Actions only — progress and gauges live in the cards. A fixed
             // height keeps the button pinned in place whether or not a
-            // selection has summoned one.
+            // selection has summoned one; bottom alignment keeps a lone
+            // button at the very bottom edge (margin = the padding) instead
+            // of floating mid-slot.
             actionSlot
-                .frame(height: 68)
+                .frame(height: 68, alignment: .bottom)
                 .padding(12)
         }
         .task {
@@ -97,7 +99,7 @@ struct SidebarView: View {
     private func pendingUploads(_ entries: [MediaEntry]) -> [(url: URL, size: Int64)] {
         entries.sorted { $0.created < $1.created }
             .flatMap(GooglePhotos.sendables(of:))
-            .filter { !google.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size)) }
+            .filter { google.uploaded[GooglePhotos.key(name: $0.name, size: $0.size)] == nil }
             .map { (URL(fileURLWithPath: $0.path), $0.size) }
     }
 
@@ -123,6 +125,12 @@ struct SidebarView: View {
                 Text("Uploading \(min(google.sentCount + files.count, google.sendTotal)) of \(google.sendTotal)")
                     .font(.callout)
                 Spacer(minLength: 4)
+                Button { google.pauseUpload() } label: {
+                    Image(systemName: "pause.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Pause — Resume continues from the bytes Google already holds")
                 Button { google.cancelUpload() } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
@@ -157,13 +165,41 @@ struct SidebarView: View {
         .help("Click to show in the grid")
     }
 
+    /// The card's state between pause and resume: what the batch still owes,
+    /// and the two ways out.
+    private var uploadPausedRow: some View {
+        let left = google.pausedRemaining
+        return HStack(spacing: 8) {
+            Image(systemName: "pause.circle")
+                .foregroundStyle(.secondary)
+            Text(left > 0 ? "Paused — \(left) file\(left == 1 ? "" : "s") left" : "Paused")
+                .font(.callout)
+            Spacer(minLength: 4)
+            Button { google.resumeUpload() } label: {
+                Image(systemName: "play.circle.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Resume — partial files continue where they stopped")
+            Button { google.cancelUpload() } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Forget the rest of this batch")
+        }
+    }
+
     /// The local source's primary action: send what's selected to Google
     /// Photos, or offer the folder when there's nothing to send. Actions
     /// only — while a batch runs the slot stays empty, because the Sync
     /// Status card already carries the progress and the cancel.
     @ViewBuilder private var uploadActions: some View {
         let pending = pendingUploads(model.selectedEntries)
-        if google.sending {
+        if google.sending || google.uploadPaused {
+            // While a batch runs — or waits, paused — the Sync Status card
+            // carries the story; a second Upload button under it would race
+            // the Resume in the card.
             Color.clear
         } else if !google.isSignedIn {
             VStack(spacing: 7) {
@@ -295,7 +331,18 @@ struct SidebarView: View {
                 SidebarCard(title: "Sync Status") {
                     VStack(alignment: .leading, spacing: 12) {
                         googleMetric
-                        if google.sending { uploadProgress }
+                        if google.sending {
+                            uploadProgress
+                        } else if google.uploadPaused {
+                            uploadPausedRow
+                        } else if let summary = google.lastBatchSummary {
+                            // What the last batch really did — uploads
+                            // Google confirmed, kept apart from skips and
+                            // failures — until the next batch replaces it.
+                            Label(summary, systemImage: "clock.arrow.circlepath")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -376,7 +423,7 @@ struct SidebarView: View {
         if google.isSignedIn {
             let all = model.entries.flatMap(GooglePhotos.sendables(of:))
             let done = all.filter {
-                google.uploaded.contains(GooglePhotos.key(name: $0.name, size: $0.size))
+                google.uploaded[GooglePhotos.key(name: $0.name, size: $0.size)] != nil
             }.count
             let fraction = all.isEmpty ? 0 : Double(done) / Double(all.count)
             // Floored, not rounded: 999 of 1000 is not "100%", and a gauge

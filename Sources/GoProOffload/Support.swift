@@ -79,6 +79,15 @@ enum Fmt {
     static let time: DateFormatter = utcFormatter("h:mm a")
     static let dayKey: DateFormatter = utcFormatter("yyyy-MM-dd")
     static let full: DateFormatter = utcFormatter("MMM d yyyy, h:mm:ss a")
+
+    /// For events that happened on this Mac (upload marks), not camera
+    /// timestamps — so unlike everything above, it speaks local time.
+    static let local: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d yyyy, h:mm a"
+        return f
+    }()
 }
 
 func shortHash(_ s: String) -> String {

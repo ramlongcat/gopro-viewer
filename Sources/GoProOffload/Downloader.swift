@@ -13,20 +13,28 @@ final class Downloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private var session: URLSession!
     private var task: URLSessionDataTask?
 
-    private init(partURL: URL, progress: @escaping @Sendable (Int64) -> Void) {
+    init(partURL: URL, progress: @escaping @Sendable (Int64) -> Void) {
         self.partURL = partURL
         self.progress = progress
         super.init()
     }
 
-    /// Downloads `url` to `partURL`, resuming from its current size if it exists.
-    /// Calls `progress` with total bytes present locally (resume offset included).
-    static func fetch(url: URL, partURL: URL, progress: @escaping @Sendable (Int64) -> Void) async throws {
-        let d = Downloader(partURL: partURL, progress: progress)
-        try await d.run(url: url)
+    private var aborted = false
+
+    /// Stops the network task without cancelling the calling Swift task —
+    /// run(url:) throws GoProError.cancelled, and the .part file keeps its
+    /// bytes, so a later run resumes where this one stopped. This is what a
+    /// paused transfer pulls; a real cancel still travels through task
+    /// cancellation. Sticky, so an abort that lands before the request even
+    /// starts doesn't let a multi-gigabyte file sail on un-paused.
+    func abort() {
+        aborted = true
+        task?.cancel()
     }
 
-    private func run(url: URL) async throws {
+    /// Downloads `url` to `partURL`, resuming from its current size if it exists.
+    /// Calls `progress` with total bytes present locally (resume offset included).
+    func run(url: URL) async throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: partURL.path) {
             fm.createFile(atPath: partURL.path, contents: nil)
@@ -52,6 +60,10 @@ final class Downloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                if aborted {
+                    cont.resume(throwing: GoProError.cancelled)
+                    return
+                }
                 continuation = cont
                 let t = session.dataTask(with: request)
                 task = t

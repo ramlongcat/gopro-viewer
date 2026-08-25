@@ -16,6 +16,7 @@ struct GPSSummary {
 struct MediaDetailView: View {
     let entry: MediaEntry
     @EnvironmentObject var model: AppModel
+    @ObservedObject private var google = GooglePhotos.shared
     @State private var raw: [String: String]?
     @State private var photo: PhotoGPS.Details?
     @State private var gps: GPSSummary?
@@ -34,6 +35,9 @@ struct MediaDetailView: View {
             fileSection
             if entry.isVideo { videoSection }
             if entry.isPhoto { photoSection }
+            // Upload marks belong to the Mac library — the camera side's
+            // tick means "copied here" and has its own tooltip story.
+            if model.source == .mac { googleSection }
             // The GPS track lives inside the clip, so it reads the same
             // whether the file is still on the camera or already copied here.
             // The camera's own metadata is an endpoint, so it stays camera-only.
@@ -113,6 +117,51 @@ struct MediaDetailView: View {
                 Text("No capture details in this file.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The file's standing with Google Photos: whether it's up, when the
+    /// mark was made, and — the part a bare checkmark can't say — whether
+    /// Google confirmed it or someone marked it by hand. The link is
+    /// Google's own productUrl for the created item: one click settles any
+    /// "is it really there?" doubt.
+    @ViewBuilder
+    private var googleSection: some View {
+        let files = GooglePhotos.sendables(of: entry)
+        if !files.isEmpty {
+            let records = files.compactMap {
+                google.uploaded[GooglePhotos.key(name: $0.name, size: $0.size)]
+            }
+            Section("Google Photos") {
+                if records.isEmpty {
+                    row("Status", "Not uploaded")
+                } else {
+                    row("Status", records.count == files.count
+                        ? "Uploaded"
+                        : "\(records.count) of \(files.count) files uploaded")
+                    // Local time on purpose: this is when *this Mac* made the
+                    // mark, not a camera-clock timestamp.
+                    row("Marked as uploaded",
+                        records.compactMap(\.date).max().map(Fmt.local.string(from:))
+                            ?? "Not recorded (older version)")
+                    let sources = Set(records.compactMap(\.source))
+                    if sources == ["google"] {
+                        row("How", "Confirmed by Google")
+                    } else if sources == ["manual"] {
+                        row("How", "Marked by hand")
+                    } else if !sources.isEmpty {
+                        row("How", "Partly confirmed, partly by hand")
+                    }
+                    if let link = records.compactMap(\.link).first,
+                       let url = URL(string: link) {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("Open in Google Photos", systemImage: "arrow.up.forward.square")
+                        }
+                    }
+                }
             }
         }
     }
@@ -356,7 +405,8 @@ struct MediaDetailView: View {
         // Reading a clip's telemetry costs dozens of ranged requests. During a
         // copy the camera is saturated — and turbo transfer makes it ignore
         // most else anyway — so stand down like the thumbnail loader does.
-        if model.source == .camera, model.transfers.isActive {
+        // (A *paused* copy has lifted turbo; reading is fine then.)
+        if model.source == .camera, model.transfers.holdsCamera {
             gpsPaused = true
             return
         }

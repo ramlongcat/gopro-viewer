@@ -21,10 +21,31 @@ final class GooglePhotos: ObservableObject {
     @Published private(set) var account: String?
     @Published private(set) var busy = false
     @Published private(set) var lastError: String?
-    /// "name|size" of every file this app has put in Google Photos, so a
-    /// second pass doesn't send it twice.
-    @Published private(set) var uploaded: Set<String> = []
+
+    /// Everything known about one file's place in Google Photos. The point
+    /// of keeping more than a bare "it's up there" bit is trust: a mark that
+    /// says *when* it was made and *whether Google confirmed it* can be
+    /// audited later, which a naked set membership famously could not.
+    struct UploadRecord: Codable, Equatable {
+        /// When the mark was made — the moment Google confirmed the item,
+        /// or the moment the user marked it by hand. Nil for marks written
+        /// by 1.19 and earlier, which recorded only the key.
+        var date: Date?
+        /// "google" when mediaItems:batchCreate answered Success for this
+        /// very file; "manual" for the context-menu override. The inspector
+        /// says which, because they deserve different amounts of trust.
+        var source: String?
+        /// Google's productUrl for the created item — a direct link to it
+        /// in the library, and proof the upload really happened.
+        var link: String?
+    }
+
+    /// Keyed "name|size" for every file this app believes is in Google
+    /// Photos, so a second pass doesn't send it twice.
+    @Published private(set) var uploaded: [String: UploadRecord] = [:]
     @Published private(set) var sending = false
+    /// A batch the user paused mid-flight, waiting for resume or cancel.
+    @Published private(set) var uploadPaused = false
     @Published private(set) var sentCount = 0
     @Published private(set) var sendTotal = 0
     /// One file being sent right now, keyed by "name|size" — up to
@@ -49,6 +70,12 @@ final class GooglePhotos: ObservableObject {
     @Published private(set) var sendDoneBytes: Int64 = 0
     @Published private(set) var sendTotalBytes: Int64 = 0
     @Published private(set) var sendSpeed: Double = 0
+    /// What the last finished batch actually did — "3 files uploaded · 1
+    /// failed" — shown in the Sync Status card until the next batch. The
+    /// counts keep "confirmed by Google this run" strictly apart from
+    /// "skipped because it was already marked": conflating the two once let
+    /// a batch that sent nothing announce it had uploaded 214 files.
+    @Published private(set) var lastBatchSummary: String?
 
     /// Several files at once: on a high-latency or per-connection-throttled
     /// link (satellite backhaul, hotel-grade QoS) one TCP stream cannot fill
@@ -57,14 +84,28 @@ final class GooglePhotos: ObservableObject {
     private static let parallelUploads = 3
     private var speedWindow: [(Date, Int64)] = []
     private var speedTimer: Task<Void, Never>?
-    private var nextIndex = 0
+    /// Files the running batch hasn't started yet. A mutable queue rather
+    /// than an index so "Upload Now" can move a file to the front.
+    private var queue: [(url: URL, size: Int64)] = []
     private var pendingCreates: [PendingCreate] = []
+    /// When the oldest entry in `pendingCreates` was queued — the age
+    /// trigger for flushing (see `uploadWorker`).
+    private var firstPendingAt: Date?
     private var rejectCount = 0
+    /// Files this batch skipped because they were already marked uploaded.
+    private var skippedCount = 0
+    /// Files Google confirmed as media items this batch — the only number
+    /// that may honestly be called "uploaded".
+    private var createdCount = 0
+    /// Order files were taken in, for the card's stable in-flight listing.
+    private var takeCounter = 0
 
     private var accessToken: String?
     private var accessExpiry = Date.distantPast
     private var listener: NWListener?
     private var sendTask: Task<Void, Never>?
+    /// The batch as begun, remembered so a pause knows what resume owes.
+    private var batchItems: [(url: URL, size: Int64)] = []
 
     private let scopes = "https://www.googleapis.com/auth/photoslibrary.appendonly openid email"
     private let keychainService = "GoProViewer.GooglePhotos"
@@ -72,11 +113,16 @@ final class GooglePhotos: ObservableObject {
     private init() {
         account = UserDefaults.standard.string(forKey: Prefs.kGoogleAccount)
         uploaded = Self.loadUploaded()
+        loadSessions()
     }
 
     var isSignedIn: Bool { account != nil && refreshToken != nil }
 
     static func key(name: String, size: Int64) -> String { "\(name)|\(size)" }
+
+    private static func key(of item: (url: URL, size: Int64)) -> String {
+        key(name: item.url.lastPathComponent, size: item.size)
+    }
 
     /// The files of an entry Google Photos can take — videos and JPGs, never
     /// .LRV/.THM proxies or .GPR raws. Every uploader and every "is it up
@@ -96,9 +142,18 @@ final class GooglePhotos: ObservableObject {
     func setUploaded(_ on: Bool, files: [CameraFile]) {
         for f in files {
             let k = Self.key(name: f.name, size: f.size)
-            if on { uploaded.insert(k) } else { uploaded.remove(k) }
+            if on {
+                // Never downgrade a Google-confirmed record (with its date
+                // and link) to a weaker by-hand one.
+                if uploaded[k]?.source != "google" {
+                    uploaded[k] = UploadRecord(date: Date(), source: "manual")
+                }
+            } else {
+                uploaded[k] = nil
+            }
         }
         Self.saveUploaded(uploaded)
+        AppLog.log("google photos: \(files.count) file(s) marked \(on ? "as uploaded" : "not uploaded") by hand")
     }
 
     // MARK: Sign in
@@ -165,33 +220,100 @@ final class GooglePhotos: ObservableObject {
 
     // MARK: Upload
 
-    /// One file's open resumable session, kept for the life of the app so a
-    /// failed or cancelled upload continues from the last byte Google holds
-    /// instead of starting over. (Google keeps the session for 7 days.)
-    private struct ResumableSession {
+    /// One file's open resumable session, kept — and persisted to disk — so
+    /// a failed, cancelled or quit-mid-file upload continues from the last
+    /// byte Google holds instead of starting over. (Google keeps the session
+    /// for 7 days; on a thin link, hours of progress hang on remembering it.)
+    private struct ResumableSession: Codable {
         let url: URL
         let granularity: Int64
+        var started = Date()
     }
     private var sessions: [String: ResumableSession] = [:]
 
-    /// Chunks start deliberately small: each is its own HTTP request, so
-    /// URLSession's idle timeout — which used to kill a whole-file POST the
-    /// first time the uplink stalled for a minute — scopes to one slice that
-    /// even a dial-up-grade link finishes in time, and a failure costs one
-    /// chunk, not the file. But on a fast uplink small chunks waste real time
-    /// (a round trip of dead air after every 160 ms send), so each full chunk
-    /// that finishes quickly doubles the next, up to a cap the timeout still
-    /// covers at ~4.5 Mbps; the first sign of trouble drops straight back.
-    /// The size persists across the batch — hundreds of small photos never
-    /// individually last long enough to learn the link.
-    private static let chunkFloor: Int64 = 4 << 20
+    private static var sessionsFile: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("GoProOffload/google-sessions.json")
+    }
+
+    private func loadSessions() {
+        guard let data = try? Data(contentsOf: Self.sessionsFile),
+              let dict = try? JSONDecoder().decode([String: ResumableSession].self, from: data)
+        else { return }
+        // Only sessions still inside Google's window come back; `upload`
+        // queries each one before trusting a byte of it anyway.
+        sessions = dict.filter { Date().timeIntervalSince($0.value.started) < 6.5 * 86_400 }
+    }
+
+    /// Every mutation goes through here so the on-disk copy stays current.
+    private func setSession(_ key: String, _ session: ResumableSession?) {
+        sessions[key] = session
+        let snapshot = sessions
+        let url = Self.sessionsFile
+        Task.detached(priority: .utility) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? JSONEncoder().encode(snapshot).write(to: url)
+        }
+    }
+
+    /// Chunking is paced by a *measured* link rate, not a fixed ladder. Each
+    /// chunk is its own HTTP request, so trouble costs one slice, not the
+    /// file — but the slice must be big enough not to waste a fast uplink on
+    /// round trips, and small enough that a thin one finishes before its
+    /// deadline. A grow-fast/shrink-on-stall ladder can't find that size on
+    /// a shared link: three workers on a ~1 Mbps hotspot each see moments of
+    /// speed (whenever the others sit between chunks), the lucky chunk
+    /// doubled the size, and the steady share then stalled it — an endless
+    /// grow→stall→shrink sawtooth seen in the field. So every confirmed
+    /// chunk feeds an EWMA of this connection's real bytes/s, the next chunk
+    /// aims for `chunkTarget` seconds at that rate, and the deadline gets
+    /// 2.5× the expected time plus grace. Both follow the link wherever it
+    /// drifts; even a cut-off chunk recalibrates from what Google confirms
+    /// actually landed.
     private static let chunkCap: Int64 = 64 << 20
-    /// Idle timeout, not total: URLSession fires it only after this long with
-    /// no data moving, so a slow-but-flowing chunk never trips it. 30 s calls
-    /// a stall a stall while it's still worth reacting to — at the old 120 s,
-    /// a dead patch of link meant staring at a frozen bar for two minutes
-    /// before anything was even attempted.
+    /// A slice never shrinks below this — it stays a multiple of the 256 KB
+    /// granularity Google's sessions ask for, and at the floor rate it still
+    /// beats its deadline with room to spare.
+    private static let chunkMin: Int64 = 512 << 10
+    /// How long a chunk should take at the observed rate. Long enough to
+    /// amortise the round trip, short enough that one lost chunk is cheap.
+    private static let chunkTarget: TimeInterval = 15
+    /// The rate estimate never drops below ~8 KB/s: below that the link is
+    /// treated as dead-ish and deadlines stop growing.
+    private static let rateFloor: Double = 8_000
+    /// Base patience for small control requests, and the least any chunk
+    /// deadline can be. (URLRequest's timeout is idle-based, but an upload's
+    /// "activity" is bytes handed to the socket buffer — a whole small chunk
+    /// buffers instantly, so in practice the deadline must cover the full
+    /// wire time of the slice.)
     private static let chunkTimeout: TimeInterval = 30
+
+    /// Observed per-connection upload rate (bytes/s). Nil until the first
+    /// chunk of a batch lands — the first slice is a modest 1 MB probe with
+    /// a patient deadline, then this takes over.
+    private var linkRate: Double?
+
+    private func noteRate(_ observed: Double) {
+        let clamped = max(Self.rateFloor, observed)
+        linkRate = linkRate.map { $0 * 0.6 + clamped * 0.4 } ?? clamped
+    }
+
+    /// A cut-off chunk whose bytes went nowhere: no observation to feed, so
+    /// assume half the estimate and let real data correct it.
+    private func pessimizeRate() {
+        linkRate = max(Self.rateFloor, (linkRate ?? 100_000) / 2)
+    }
+
+    private func plannedChunk() -> Int64 {
+        guard let r = linkRate else { return 1 << 20 }
+        return min(Self.chunkCap, max(Self.chunkMin, Int64(r * Self.chunkTarget)))
+    }
+
+    private func chunkDeadline(for len: Int64) -> TimeInterval {
+        guard let r = linkRate, r > 0 else { return 60 }
+        return min(180, max(Self.chunkTimeout, Double(len) / r * 2.5 + 10))
+    }
     /// The finalize chunk gets far longer: after the last byte, Google
     /// assembles the whole file before answering, and a big video's silence
     /// there is processing, not a stall — timing it out would fail an upload
@@ -201,7 +323,6 @@ final class GooglePhotos: ObservableObject {
     /// already burned half a minute — then backing off. Any confirmed
     /// progress resets the whole ladder.
     private static let retryDelays: [Int] = [1, 2, 5, 10, 30, 60]
-    private var chunkBytes: Int64 = GooglePhotos.chunkFloor
 
     /// Sends one file's bytes and returns the upload token; the caller
     /// registers the token as a media item (creates are batched — see
@@ -233,7 +354,7 @@ final class GooglePhotos: ObservableObject {
             }
         } else {
             session = try await startSession(for: url, size: size)
-            sessions[key] = session
+            setSession(key, session)
         }
 
         let total = Double(max(1, size))
@@ -245,7 +366,7 @@ final class GooglePhotos: ObservableObject {
         while uploadToken == nil {
             if Task.isCancelled { throw CancellationError() }
             let remaining = size - offset
-            let planned = chunkBytes
+            let planned = plannedChunk()
             var len = min(remaining, planned)
             if len < remaining {
                 // Every chunk but the last must be a multiple of the
@@ -259,7 +380,10 @@ final class GooglePhotos: ObservableObject {
                 throw GoogleError.message("Couldn't read the file — did it change on disk?")
             }
             let base = offset
-            let progress = UploadProgress { [weak self] sent in
+            // Publishing every callback made the whole window redraw
+            // hundreds of times a second on a fast link — the grid visibly
+            // stuttered while a batch ran. ~1% of a chunk is plenty live.
+            let progress = UploadProgress(minStep: max(128 << 10, len / 100)) { [weak self] sent in
                 let pos = base + min(sent, len)
                 Task { @MainActor in
                     self?.inFlight[key]?.fraction = Double(pos) / total
@@ -269,7 +393,7 @@ final class GooglePhotos: ObservableObject {
             let started = Date()
             do {
                 var req = URLRequest(url: session.url)
-                req.timeoutInterval = last ? Self.finalizeTimeout : Self.chunkTimeout
+                req.timeoutInterval = last ? Self.finalizeTimeout : chunkDeadline(for: len)
                 req.httpMethod = "POST"
                 req.setValue("Bearer \(try await validAccessToken())", forHTTPHeaderField: "Authorization")
                 req.setValue(last ? "upload, finalize" : "upload", forHTTPHeaderField: "X-Goog-Upload-Command")
@@ -283,7 +407,7 @@ final class GooglePhotos: ObservableObject {
                 // and so does 429, which is pressure, not a verdict: with
                 // several workers Google may meter us for a moment.
                 if (400..<500).contains(status), status != 429 {
-                    sessions[key] = nil
+                    setSession(key, nil)
                     try Self.check(resp, data, "Upload")
                 }
                 guard (200..<300).contains(status) else { throw URLError(.badServerResponse) }
@@ -292,14 +416,15 @@ final class GooglePhotos: ObservableObject {
                 inFlight[key]?.fraction = Double(offset) / total
                 inFlight[key]?.bytes = offset
                 inFlight[key]?.note = nil
-                // Only a full-size chunk proves the link — the short final
-                // slice of a small photo finishes fast at any speed.
-                if len == planned, Date().timeIntervalSince(started) < 30 {
-                    chunkBytes = min(planned * 2, Self.chunkCap)
+                // Feed the estimate from real slices only — the short final
+                // sliver of a photo finishes fast at any speed and would
+                // only add noise.
+                if len >= Self.chunkMin {
+                    noteRate(Double(len) / max(0.05, Date().timeIntervalSince(started)))
                 }
                 if last {
                     guard let t = String(data: data, encoding: .utf8), !t.isEmpty else {
-                        sessions[key] = nil
+                        setSession(key, nil)
                         throw GoogleError.message("Google returned no upload token.")
                     }
                     uploadToken = t
@@ -310,10 +435,10 @@ final class GooglePhotos: ObservableObject {
                 // Transport trouble — a timeout, a dropped connection, a 5xx.
                 if Task.isCancelled { throw error }
                 attempts += 1
-                chunkBytes = Self.chunkFloor
+                let sendElapsed = Date().timeIntervalSince(started)
                 guard attempts <= Self.retryDelays.count else { throw error }
                 let delay = Self.retryDelays[attempts - 1]
-                AppLog.log("google photos: \(url.lastPathComponent) stalled at \(Self.pct(offset, size)) — retry \(attempts) of \(Self.retryDelays.count) in \(delay) s")
+                AppLog.log("google photos: \(url.lastPathComponent) stalled at \(Self.pct(offset, size)) — \(Fmt.size(len)) chunk cut at \(Int(sendElapsed)) s — retry \(attempts) of \(Self.retryDelays.count) in \(delay) s")
                 // The wait counts down in the card — an unexplained frozen
                 // bar is what this note exists to prevent.
                 for left in stride(from: delay, through: 1, by: -1) {
@@ -324,13 +449,29 @@ final class GooglePhotos: ObservableObject {
                 inFlight[key]?.note = "stalled — retrying"
                 // Trust only what Google says it holds — and if the link
                 // moved at all since the last try, the retry budget resets.
+                // Bytes that landed before the cut are also the most honest
+                // rate sample there is (this is how a mis-sized chunk on a
+                // thin link self-corrects instead of stalling again); a cut
+                // with nothing to show halves the estimate instead.
                 if let got = try? await queryOffset(of: session) {
-                    if got > offset { attempts = 0 }
+                    let delta = min(got, size) - offset
+                    if delta > 0 {
+                        attempts = 0
+                        // Adopted outright, not blended: the cut is proof the
+                        // estimate was wrong, and this is a direct reading of
+                        // what the link does *now*. Successes blend the
+                        // estimate back up smoothly afterwards.
+                        linkRate = max(Self.rateFloor, Double(delta) / max(1, sendElapsed))
+                    } else {
+                        pessimizeRate()
+                    }
                     offset = min(got, size)
+                } else {
+                    pessimizeRate()
                 }
             }
         }
-        sessions[key] = nil
+        setSession(key, nil)
         guard let uploadToken else {
             // Unreachable — the loop only exits with a token — but honest
             // about it beats a force-unwrap.
@@ -385,7 +526,15 @@ final class GooglePhotos: ObservableObject {
                     AppLog.log("google photos: \(item.name) rejected — \(msg)")
                     continue
                 }
-                markUploaded(name: item.name, size: item.size)
+                let media = results[i]["mediaItem"] as? [String: Any]
+                markUploaded(name: item.name, size: item.size,
+                             link: media?["productUrl"] as? String)
+                createdCount += 1
+            }
+            // The line that says it *actually* happened — per flush, so even
+            // a batch the app doesn't survive leaves a record of what landed.
+            if batch.count > failures {
+                AppLog.log("google photos: \(batch.count - failures) item(s) confirmed by Google")
             }
         } catch {
             failures += batch.count
@@ -403,6 +552,7 @@ final class GooglePhotos: ObservableObject {
         guard !pendingCreates.isEmpty else { return 0 }
         let batch = pendingCreates
         pendingCreates = []
+        firstPendingAt = nil
         return await Task { await self.flushCreates(batch) }.value
     }
 
@@ -431,13 +581,89 @@ final class GooglePhotos: ObservableObject {
     /// Kicks the batch off on its own task so Cancel has something to pull.
     func beginUpload(_ items: [(url: URL, size: Int64)]) {
         guard !sending else { return }
+        batchItems = items
         sendTask = Task { await uploadAll(items) }
     }
 
     /// Aborts the file in flight too, not just the ones still queued —
     /// cancelling a 5 GB clip shouldn't have to wait for it to finish.
     func cancelUpload() {
+        uploadPaused = false
+        batchItems = []
         sendTask?.cancel()
+    }
+
+    /// Pause is the same pull Cancel makes — every worker stops mid-chunk —
+    /// but the batch is remembered. Nothing already sent is lost: each
+    /// file's resumable session survives (Google keeps them for 7 days), so
+    /// Resume re-queues what's left and a partial file continues from the
+    /// last byte Google confirmed holding.
+    func pauseUpload() {
+        guard sending, !uploadPaused else { return }
+        uploadPaused = true
+        sendTask?.cancel()
+    }
+
+    /// Sends what the paused batch still owes. `uploadPaused` stays set
+    /// until the new run actually starts, so the card keeps its Paused state
+    /// through the old task's teardown instead of flashing the idle slot.
+    func resumeUpload() {
+        guard uploadPaused, !sending else { return }
+        let batch = batchItems
+        let old = sendTask
+        sendTask = Task {
+            // The paused run may still be tearing down; queue behind it
+            // rather than racing the `sending` guard.
+            _ = await old?.value
+            let left = batch.filter { self.uploaded[Self.key(of: $0)] == nil }
+            guard !left.isEmpty else {
+                self.uploadPaused = false
+                return
+            }
+            await self.uploadAll(left)
+        }
+    }
+
+    /// Files the paused batch still owes — what Resume would send.
+    var pausedRemaining: Int {
+        batchItems.filter { uploaded[Self.key(of: $0)] == nil }.count
+    }
+
+    /// The context menu's "Upload Now": send these files ahead of everything
+    /// else. In a running batch they jump to the front of the queue (files
+    /// already moving keep moving — the next free worker takes them); while
+    /// paused they go first in what Resume owes, and Resume is pressed; idle,
+    /// they become their own batch. Files already marked uploaded are left
+    /// alone — unmark first to force a re-send.
+    func uploadNow(_ items: [(url: URL, size: Int64)]) {
+        let fresh = items.filter { uploaded[Self.key(of: $0)] == nil }
+        guard !fresh.isEmpty else { return }
+        let keys = Set(fresh.map(Self.key(of:)))
+        if sending {
+            // batchItems is the batch as begun plus everything added since —
+            // the membership test for "was this already counted in the
+            // totals". (Queue and in-flight alone would miss a file the
+            // batch already tried and gave up on.)
+            let inBatch = Set(batchItems.map(Self.key(of:)))
+            queue.removeAll { keys.contains(Self.key(of: $0)) }
+            // A file some worker is sending right now is as "now" as it gets.
+            let jumpers = fresh.filter { inFlight[Self.key(of: $0)] == nil }
+            queue.insert(contentsOf: jumpers, at: 0)
+            // Newcomers weren't part of this batch — grow its totals so the
+            // card's counts stay truthful.
+            for item in jumpers where !inBatch.contains(Self.key(of: item)) {
+                sendTotal += 1
+                sendTotalBytes += item.size
+                batchItems.append(item)
+            }
+            AppLog.log("google photos: \(jumpers.count) file(s) moved to the front of the queue")
+        } else if uploadPaused {
+            batchItems.removeAll { keys.contains(Self.key(of: $0)) }
+            batchItems.insert(contentsOf: fresh, at: 0)
+            resumeUpload()
+        } else {
+            beginUpload(fresh)
+        }
     }
 
     /// A small pool of workers pulls files off one shared queue. A file
@@ -450,18 +676,24 @@ final class GooglePhotos: ObservableObject {
     func uploadAll(_ items: [(url: URL, size: Int64)]) async {
         guard !sending else { return }
         sending = true
+        uploadPaused = false
         sentCount = 0
         sendTotal = items.count
         sendTotalBytes = items.map(\.size).reduce(0, +)
         sendDoneBytes = 0
         sendSpeed = 0
         speedWindow = []
-        chunkBytes = Self.chunkFloor
+        linkRate = nil
         lastError = nil
+        lastBatchSummary = nil
         inFlight = [:]
-        nextIndex = 0
+        queue = items
         pendingCreates = []
+        firstPendingAt = nil
         rejectCount = 0
+        skippedCount = 0
+        createdCount = 0
+        takeCounter = 0
         speedTimer?.cancel()
         speedTimer = Task { [weak self] in
             while !Task.isCancelled {
@@ -469,11 +701,15 @@ final class GooglePhotos: ObservableObject {
                 self?.sampleSpeed()
             }
         }
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<max(1, min(Self.parallelUploads, items.count)) {
-                group.addTask { await self.uploadWorker(items) }
+        // "Upload Now" can refill the queue after the workers drained it;
+        // late arrivals get another round rather than being dropped.
+        repeat {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<max(1, min(Self.parallelUploads, queue.count)) {
+                    group.addTask { await self.uploadWorker() }
+                }
             }
-        }
+        } while !Task.isCancelled && !queue.isEmpty
         rejectCount += await flushDetached()
         speedTimer?.cancel()
         speedTimer = nil
@@ -481,22 +717,45 @@ final class GooglePhotos: ObservableObject {
         sending = false
         inFlight = [:]
         sendSpeed = 0
-        AppLog.log(cancelled
-                   ? "google photos: upload cancelled after \(sentCount) of \(sendTotal)"
-                   : "google photos: uploaded \(sendTotal - rejectCount) of \(sendTotal)")
+        // What one run may claim: only creates Google confirmed. Skips and
+        // failures are named as what they are — the old "uploaded X of Y"
+        // arithmetic counted every skip as an upload, so a batch that moved
+        // no bytes could still announce victory.
+        if cancelled, uploadPaused {
+            AppLog.log("google photos: upload paused — \(createdCount) confirmed first, \(pausedRemaining) left")
+        } else if cancelled {
+            if createdCount > 0 {
+                lastBatchSummary = "Stopped — \(createdCount) file\(createdCount == 1 ? "" : "s") uploaded first"
+            }
+            AppLog.log("google photos: upload cancelled — \(createdCount) of \(sendTotal) confirmed")
+        } else {
+            var bits = ["\(createdCount) file\(createdCount == 1 ? "" : "s") uploaded"]
+            if skippedCount > 0 { bits.append("\(skippedCount) already there") }
+            if rejectCount > 0 { bits.append("\(rejectCount) failed") }
+            lastBatchSummary = bits.joined(separator: " · ")
+            AppLog.log("google photos: batch finished — " + bits.joined(separator: ", "))
+        }
+        // The rare straggler: an "Upload Now" that landed while the batch
+        // was already wrapping up becomes its own small batch.
+        if !cancelled, !queue.isEmpty {
+            let rest = queue
+            queue = []
+            beginUpload(rest)
+        }
     }
 
     /// One worker: take the next file, see it through, repeat. Everything it
     /// mutates is MainActor-confined and touched without an await in
     /// between, so no file can be taken twice.
-    private func uploadWorker(_ items: [(url: URL, size: Int64)]) async {
-        while !Task.isCancelled, nextIndex < items.count {
-            let idx = nextIndex
-            nextIndex += 1
-            let item = items[idx]
-            let key = Self.key(name: item.url.lastPathComponent, size: item.size)
-            if uploaded.contains(key) {
+    private func uploadWorker() async {
+        while !Task.isCancelled, !queue.isEmpty {
+            let item = queue.removeFirst()
+            takeCounter += 1
+            let ordinal = takeCounter
+            let key = Self.key(of: item)
+            if uploaded[key] != nil {
                 sentCount += 1
+                skippedCount += 1
                 sendDoneBytes += item.size
                 // Skipped bytes were never transferred; without a reset the
                 // jump would read as a burst of speed.
@@ -504,7 +763,7 @@ final class GooglePhotos: ObservableObject {
                 continue
             }
             inFlight[key] = FileProgress(name: item.url.lastPathComponent,
-                                         size: item.size, ordinal: idx)
+                                         size: item.size, ordinal: ordinal)
             var finished = false
             while !finished, !Task.isCancelled {
                 do {
@@ -512,11 +771,20 @@ final class GooglePhotos: ObservableObject {
                     pendingCreates.append(PendingCreate(token: token,
                                                         name: item.url.lastPathComponent,
                                                         size: item.size))
+                    if firstPendingAt == nil { firstPendingAt = Date() }
                     // Twenty per flush, not batchCreate's ceiling of 50: the
                     // round trip is already amortised to noise, badges land
                     // sooner, and a crash can only orphan a few files' worth
                     // of sent bytes (orphans are simply re-sent next time).
-                    if pendingCreates.count >= 20 { rejectCount += await flushDetached() }
+                    // The age trigger exists because upload tokens die after
+                    // 24 hours: on a thin link twenty files can take days,
+                    // and a token must never rot in this queue — ten minutes
+                    // is nothing next to any upload that slow, and the fast
+                    // case reaches twenty long before it.
+                    if pendingCreates.count >= 20
+                        || Date().timeIntervalSince(firstPendingAt ?? Date()) > 600 {
+                        rejectCount += await flushDetached()
+                    }
                     finished = true
                 } catch let error as GoogleError {
                     // Google's final word on this file — the next one
@@ -555,9 +823,9 @@ final class GooglePhotos: ObservableObject {
         }
     }
 
-    private func markUploaded(name: String, size: Int64) {
-        uploaded.insert(Self.key(name: name, size: size))
-        objectWillChange.send()
+    private func markUploaded(name: String, size: Int64, link: String?) {
+        uploaded[Self.key(name: name, size: size)] =
+            UploadRecord(date: Date(), source: "google", link: link)
         Self.saveUploaded(uploaded)
     }
 
@@ -751,19 +1019,25 @@ final class GooglePhotos: ObservableObject {
             .appendingPathComponent("GoProOffload/google-uploaded.json")
     }
 
-    private static func loadUploaded() -> Set<String> {
-        guard let data = try? Data(contentsOf: uploadedFile),
-              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return Set(list)
+    private static func loadUploaded() -> [String: UploadRecord] {
+        guard let data = try? Data(contentsOf: uploadedFile) else { return [:] }
+        if let dict = try? JSONDecoder().decode([String: UploadRecord].self, from: data) {
+            return dict
+        }
+        // 1.19 and earlier kept a bare list of keys. The marks stay trusted;
+        // their history just wasn't written down yet, so the records are empty.
+        if let list = try? JSONDecoder().decode([String].self, from: data) {
+            return Dictionary(uniqueKeysWithValues: list.map { ($0, UploadRecord()) })
+        }
+        return [:]
     }
 
-    private static func saveUploaded(_ set: Set<String>) {
+    private static func saveUploaded(_ dict: [String: UploadRecord]) {
         let url = uploadedFile
-        let list = Array(set)
         Task.detached(priority: .utility) {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                      withIntermediateDirectories: true)
-            try? JSONEncoder().encode(list).write(to: url)
+            try? JSONEncoder().encode(dict).write(to: url)
         }
     }
 
@@ -806,11 +1080,24 @@ final class GooglePhotos: ObservableObject {
 /// upload trusts — that comes from Google.
 private final class UploadProgress: NSObject, URLSessionTaskDelegate {
     let onBytes: (Int64) -> Void
-    init(_ onBytes: @escaping (Int64) -> Void) { self.onBytes = onBytes }
+    /// Callbacks below this step apart are swallowed: each one forwarded
+    /// publishes an ObservableObject the entire window watches, and on a
+    /// fast link they arrive hundreds of times a second. (Delegate calls
+    /// for one task are serial, so the bookkeeping needs no lock.)
+    let minStep: Int64
+    private var lastSent: Int64 = 0
+
+    init(minStep: Int64, _ onBytes: @escaping (Int64) -> Void) {
+        self.minStep = minStep
+        self.onBytes = onBytes
+    }
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didSendBodyData bytesSent: Int64,
                     totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        guard totalBytesSent - lastSent >= minStep
+                || totalBytesSent == totalBytesExpectedToSend else { return }
+        lastSent = totalBytesSent
         onBytes(totalBytesSent)
     }
 }

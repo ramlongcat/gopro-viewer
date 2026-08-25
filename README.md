@@ -1,6 +1,6 @@
 # GoProViewer
 
-Version **1.18.0**
+Version **1.20.0**
 
 A simple macOS app to browse, preview, and copy files your GoPro to your mac.
 
@@ -34,6 +34,30 @@ Connect your camera to your mac, turn your camera on, enjoy! that's it.
 - Default destination is `~/Movies/GoPro` (changeable in the sidebar or Settings).
 
 ## Changelog
+
+### 1.20.0
+
+**New**
+- **The whole truth about every upload, in the ⓘ panel.** Each item now remembers *when* it was marked as uploaded and *how* — confirmed by Google itself, or marked by hand — with an *Open in Google Photos* link straight to the uploaded item, so "is it really up there?" has a one-click answer. (Uploads land in Google Photos under the day they were shot, not the day they were sent — scroll back to the capture date to find them.)
+- **Upload Now.** Right-click any item to send it to the front of the upload queue: mid-batch it jumps ahead of everything still waiting, otherwise it starts a batch of its own.
+- After a batch, the Sync Status card says what actually happened — how many files Google confirmed, how many were already there, how many failed.
+
+**Fixed**
+- **A batch can no longer claim files it merely skipped.** The completion count lumped "already marked as uploaded" in with "uploaded just now", so with a stale mark a batch that sent nothing could still announce success. The counts are now kept honestly apart, and every Google confirmation and by-hand mark is written to the log.
+- **Scrolling your library is smooth again.** Video durations are read once and kept for good instead of re-read from every file on every visit — and they arrive together instead of one grid refresh per video. A running upload also no longer redraws the window many times a second to move its gauges.
+- **Uploads now survive quitting the app.** A file partway up when the app closes continues from the last byte Google confirmed instead of starting over — hours saved on a slow connection.
+- **Slow connections can no longer outlive their upload tickets.** Google's upload tickets expire after a day, and on a thin link a batch could take longer than that to finish — files sent in full were then rejected at the very end. Finished files are now registered with Google within minutes, whatever the pace.
+
+### 1.19.0
+
+**New**
+- **Pause a copy or an upload.** Both cards grew a pause button next to cancel. A paused copy stops mid-file and later resumes from that exact byte — and while it waits, the camera is yours again: thumbnails, hover previews and the info panel all work, because pausing also lifts the camera's transfer mode. A paused upload keeps its place too: resume continues each partial file from the last byte Google confirmed, and finished files are never sent twice.
+
+**Fixed**
+- **Uploads on a slow connection no longer churn.** On a modest uplink (an LTE hotspot, hotel Wi-Fi) pieces of a file were endlessly cut off as "stalled" even while data was flowing — the Mac hands a whole piece to the network at once, so the connection *looked* idle while it drained, and the piece size lurched between too big and too small instead of settling. The app now measures what the connection actually carries and sizes every piece — and its patience — from that measurement, so it settles into a steady, stall-free rhythm at whatever speed the link honestly has, from tethered-phone slow to fiber fast, and re-finds it within one piece when the speed shifts.
+- In the preview, the round previous/next buttons (and the other floating buttons) now respond anywhere on the button, not only on the symbol's thin strokes.
+- The two-finger swipe in the preview now actually steps between items when a photo is showing — the photo surface was swallowing the gesture. Scrolling up and down on a fitted photo no longer bounces it pointlessly either; once zoomed in, scrolling pans as before.
+- The action button at the bottom of the sidebar sits at the very bottom, with an even margin, instead of floating above unused space.
 
 ### 1.18.0
 

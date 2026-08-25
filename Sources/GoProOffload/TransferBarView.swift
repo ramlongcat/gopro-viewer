@@ -21,18 +21,26 @@ struct SidebarTransferStatus: View {
         if transfers.totalKnownBytes > 0 {
             note += " · \(Fmt.size(transfers.doneBytes + transfers.currentFileBytes)) of \(Fmt.size(transfers.totalKnownBytes))"
         }
+        let paused = transfers.isPaused
         return VStack(alignment: .leading, spacing: 8) {
             SidebarMetric(
-                icon: "arrow.down.circle",
+                icon: paused ? "pause.circle" : "arrow.down.circle",
                 title: transfers.toTransferCount == 0
                     ? "Checking what's copied"
-                    : "Copying \(min(transfers.filesDone + 1, transfers.toTransferCount)) of \(transfers.toTransferCount)",
+                    : "\(paused ? "Paused — " : "Copying ")\(min(transfers.filesDone + 1, transfers.toTransferCount)) of \(transfers.toTransferCount)",
                 value: transfers.overallFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "",
                 fraction: transfers.overallFraction
                     ?? Double(transfers.filesDone) / Double(max(1, transfers.toTransferCount)),
                 subtitle: note)
-            Button("Cancel") { transfers.cancel() }
-                .controlSize(.small)
+            HStack(spacing: 8) {
+                Button(paused ? "Resume" : "Pause") {
+                    paused ? transfers.resume() : transfers.pause()
+                }
+                .help(paused ? "Continue where it left off"
+                             : "Stop copying for now — the file in flight resumes from where it stopped")
+                Button("Cancel") { transfers.cancel() }
+            }
+            .controlSize(.small)
         }
         // Same affordance as the upload card: the block is a link to the
         // very tile being copied.
